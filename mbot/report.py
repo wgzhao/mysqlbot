@@ -31,10 +31,21 @@ class Outcome:
     columns: list[str] = field(default_factory=list)
     rows: list[dict] = field(default_factory=list)
     elapsed_ms: float = 0.0
+    # 规则 SQL 最外层的 LIMIT。命中行数正好等于它时，说明结果**可能被截断**：
+    # 报告里的"N 行"其实是"至少 N 行"。不标出来就会把 50 条读成"一共 50 条"。
+    row_limit: int | None = None
 
     @property
     def hit(self) -> bool:
         return self.status == HIT
+
+    @property
+    def truncated(self) -> bool:
+        return (
+            self.status == HIT
+            and self.row_limit is not None
+            and len(self.rows) >= self.row_limit
+        )
 
 
 def summarize(outcomes: list[Outcome]) -> dict[str, int]:
@@ -96,6 +107,10 @@ def build_payload(caps, outcomes: list[Outcome], meta: dict) -> dict:
                 entry["safety"] = o.rule.safety
                 entry["safety_note"] = o.rule.safety_note
             entry["rows"] = o.rows
+            # 截断可见性：row_count == row_limit 时真实数量是"至少这么多"。
+            if o.row_limit is not None:
+                entry["row_limit"] = o.row_limit
+                entry["truncated"] = o.truncated
         rules_block.append(entry)
 
     return {
@@ -116,6 +131,7 @@ def build_payload(caps, outcomes: list[Outcome], meta: dict) -> dict:
             "notes": caps.notes,
             "facts": caps.facts,
             "grants": caps.grants,
+            "visible_schemas": caps.schemas,
         },
         "summary": {
             "overall": overall_severity(outcomes),
@@ -164,6 +180,13 @@ def to_markdown(caps, outcomes: list[Outcome], meta: dict) -> str:
                 f" | {o.rule.obj} | {len(o.rows)} | {_fmt_cell(o.rule.title)} |"
             )
         out.append("")
+        truncated = [o for o in hits if o.truncated]
+        if truncated:
+            out.append(
+                "> ⚠️ 以下规则的结果**被 SQL 的 LIMIT 截断**，行数是下限而非全量："
+                + "、".join(f"`{o.rule.id}`（≥{len(o.rows)}）" for o in truncated)
+            )
+            out.append("")
         for o in sorted(hits, key=lambda x: -SEVERITY_ORDER.get(x.severity, 0)):
             out.append(f"### {SEVERITY_LABEL.get(o.severity, o.severity)} · {o.rule.id} — {o.rule.title}")
             out.append("")
@@ -182,6 +205,12 @@ def to_markdown(caps, outcomes: list[Outcome], meta: dict) -> str:
             if len(o.rows) > len(shown):
                 out.append("")
                 out.append(f"_另有 {len(o.rows) - len(shown)} 行未列出_")
+            if o.truncated:
+                out.append("")
+                out.append(
+                    f"_本规则 SQL 带 `LIMIT {o.row_limit}`，命中数已达上限——"
+                    f"真实命中 **≥ {len(o.rows)}** 条，不是 {len(o.rows)} 条。_"
+                )
             if o.rule.safety:
                 out.append("")
                 out.append(f"> ⚠️ 本项证据含可执行语句：`{o.rule.safety}`。{o.rule.safety_note}")
@@ -205,6 +234,11 @@ def to_markdown(caps, outcomes: list[Outcome], meta: dict) -> str:
     for k in sorted(caps.flags):
         ok = caps.flags[k]
         out.append(f"| `{k}` | {'✅' if ok else '❌'} | {_fmt_cell(caps.reasons.get(k, ''))} |")
+    out.append("")
+    if caps.schemas:
+        out.append(f"**扫描覆盖的 schema（{len(caps.schemas)} 个）**："
+                   + "、".join(f"`{s}`" for s in caps.schemas))
+        out.append("")
     if caps.notes:
         out.append("")
         for n in caps.notes:
@@ -245,7 +279,8 @@ def to_table(caps, outcomes: list[Outcome], meta: dict, show_rows: int = 5, verb
         out.append("没有命中任何规则。")
     for o in hits:
         label = SEVERITY_LABEL.get(o.severity, o.severity)
-        out.append(f"[{label}] {o.rule.id}  ({o.rule.dimension}/{o.rule.scope}, {len(o.rows)} 行)")
+        rows_label = f"≥{len(o.rows)} 行" if o.truncated else f"{len(o.rows)} 行"
+        out.append(f"[{label}] {o.rule.id}  ({o.rule.dimension}/{o.rule.scope}, {rows_label})")
         out.append(f"        {o.rule.title}")
         for row in o.rows[:show_rows]:
             pairs = "  ".join(
@@ -254,6 +289,8 @@ def to_table(caps, outcomes: list[Outcome], meta: dict, show_rows: int = 5, verb
             out.append(f"        · {pairs}")
         if len(o.rows) > show_rows:
             out.append(f"        · …另有 {len(o.rows) - show_rows} 行（-o json 看全量）")
+        if o.truncated:
+            out.append(f"        · 已达 SQL 的 LIMIT {o.row_limit}，真实命中 ≥ {len(o.rows)} 条")
         if verbose and o.rule.remediation:
             out.append(f"        处置: {o.rule.remediation}")
         if o.rule.safety:

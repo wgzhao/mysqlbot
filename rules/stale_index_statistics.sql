@@ -21,7 +21,7 @@ SELECT
   s.COLUMN_NAME  AS leading_column,
   s.CARDINALITY  AS cardinality,
   t.TABLE_ROWS   AS estimated_rows,
-  'ANALYZE TABLE `' || s.TABLE_SCHEMA || '`.`' || s.TABLE_NAME || '`' AS suggested_fix
+  CONCAT('ANALYZE TABLE `', s.TABLE_SCHEMA, '`.`', s.TABLE_NAME, '`') AS suggested_fix
 FROM information_schema.STATISTICS s
 JOIN information_schema.TABLES t
   ON t.TABLE_SCHEMA = s.TABLE_SCHEMA

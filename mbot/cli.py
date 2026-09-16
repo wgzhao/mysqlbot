@@ -137,6 +137,7 @@ def cmd_probe(a) -> int:
         "missing_reasons": caps.reasons,
         "facts": caps.facts,
         "grants": caps.grants,
+        "visible_schemas": caps.schemas,
         "notes": caps.notes,
     }
     text = to_json(payload)
@@ -330,6 +331,12 @@ def cmd_doctor(a) -> int:
         caps = probe(conn)
         print(f"连通性       : OK —— MySQL {caps.version_str} / user={caps.current_user}")
         print(f"能力位       : {sum(1 for v in caps.flags.values() if v)} 开 / {sum(1 for v in caps.flags.values() if not v)} 关")
+        off = sorted(k for k, v in caps.flags.items() if not v)
+        if off:
+            print(f"              关闭的：{', '.join(off)}")
+        if caps.schemas:
+            shown = "、".join(caps.schemas[:8]) + ("…" if len(caps.schemas) > 8 else "")
+            print(f"可见 schema  : {len(caps.schemas)} 个（{shown}）")
         print(f"会话前导     : {default_init_sql(caps) or '（无）'}")
     except QueryError as exc:
         print(f"连通性       : 失败 —— {exc}")

@@ -4,11 +4,11 @@
 -- @dimension: risk
 -- @scope: workload
 -- @object: trx
--- @requires: p_s,process
+-- @requires: process
 -- @exactness: catalog
 -- @since: 5.7
 -- @remediation: 典型成因是应用取了连接、开了事务却忘了 commit/rollback（例如异常分支没有回滚）。它比长事务更隐蔽：CPU 和 QPS 都看不出来，但 purge 被卡住、undo 持续增长、行锁一直不释放。
--- @caveats: 判定依据是 TRX_STATE='RUNNING' 且 TRX_QUERY 为空——事务活着但此刻没有语句在跑。应用连接池在两条语句之间也会短暂呈现该状态，因此已用 60 秒做门禁。MySQL 不暴露"事务从何时开始空闲"，open_seconds 是事务总年龄，是空闲时长的上界。
+-- @caveats: 判定依据是 TRX_STATE='RUNNING' 且 TRX_QUERY 为空——事务活着但此刻没有语句在跑。应用连接池在两条语句之间也会短暂呈现该状态，因此已用 60 秒做门禁。MySQL 不暴露"事务从何时开始空闲"，open_seconds 是事务总年龄，是空闲时长的上界。取会话的用户/来源走 information_schema.PROCESSLIST（只需 PROCESS），不用 performance_schema.threads——后者要 SELECT ON performance_schema.*，业务账号通常没有，用它会整条规则被拒。
 -- @ref: pgbot/idle_in_transaction
 --
 -- 规则契约：返回 0 行为未命中；返回行即命中，每行必须含 severity 列。
@@ -27,12 +27,12 @@ FROM (
     trx.trx_started                                AS started_at,
     TIMESTAMPDIFF(SECOND, trx.trx_started, NOW())   AS open_s,
     trx.trx_mysql_thread_id                         AS thread_id,
-    th.PROCESSLIST_USER                             AS db_user,
-    th.PROCESSLIST_HOST                             AS client_host,
+    pl.USER                                         AS db_user,
+    pl.HOST                                         AS client_host,
     trx.trx_rows_locked                             AS rows_locked
   FROM information_schema.INNODB_TRX trx
-  LEFT JOIN performance_schema.threads th
-         ON th.PROCESSLIST_ID = trx.trx_mysql_thread_id
+  LEFT JOIN information_schema.PROCESSLIST pl
+         ON pl.ID = trx.trx_mysql_thread_id
   WHERE trx.trx_state = 'RUNNING'
     AND trx.trx_query IS NULL
 ) t

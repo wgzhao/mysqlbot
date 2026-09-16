@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,12 +60,28 @@ def default_init_sql(caps: Capabilities) -> list[str]:
     return stmts
 
 
-def _match_name(name: str, patterns: list[str] | None) -> bool:
+def _normalize_patterns(patterns: list[str] | None) -> list[str]:
+    """把 `--only a,b` 这种逗号/空格分隔的写法摊平成独立 pattern。
+
+    CLI 用的是 action="append"，`--only 'a,b'` 会被当成**一个** pattern，
+    fnmatch 匹配不到任何规则 id，结果就是"过滤后没有剩余规则"——而 README/SKILL
+    里恰恰是这么示范的。所以在这里统一摊平，两种写法都认。
+    """
     if not patterns:
+        return []
+    out: list[str] = []
+    for p in patterns:
+        out.extend(part for part in re.split(r"[,\s]+", p.strip()) if part)
+    return out
+
+
+def _match_name(name: str, patterns: list[str] | None) -> bool:
+    pats = _normalize_patterns(patterns)
+    if not pats:
         return False
     from fnmatch import fnmatch
 
-    return any(fnmatch(name, p) for p in patterns)
+    return any(fnmatch(name, p) for p in pats)
 
 
 def select_rules(rules: list[Rule], opt: RunOptions) -> list[Rule]:
@@ -132,6 +149,20 @@ def _fingerprint(rule_id: str, row: dict) -> str:
     return hashlib.sha1(blob.encode("utf-8", "replace")).hexdigest()[:12]
 
 
+# 只认**结尾**的 LIMIT，即规则最外层那个。子查询里的 LIMIT 不在结尾，不会误判。
+_OUTER_LIMIT_RE = re.compile(r"\bLIMIT\s+(\d+)\s*$", re.IGNORECASE)
+
+
+def _outer_limit(sql: str) -> int | None:
+    """取规则最外层的 LIMIT 值。
+
+    用途是识别**截断**：规则为了不刷屏普遍带 `LIMIT 10/50`，当返回行数正好等于
+    该值时，"命中 N 行"的真实含义是"至少 N 行"。报告不标注就会被读成"一共就这些"。
+    """
+    m = _OUTER_LIMIT_RE.search(sql.strip().rstrip(";").strip())
+    return int(m.group(1)) if m else None
+
+
 def run_rule(rule: Rule, conn, caps: Capabilities, opt: RunOptions, preamble: list[str]) -> Outcome:
     started = time.perf_counter()
     sql = rule.sql
@@ -143,6 +174,16 @@ def run_rule(rule: Rule, conn, caps: Capabilities, opt: RunOptions, preamble: li
         elapsed = (time.perf_counter() - started) * 1000
         if exc.degradable:
             return Outcome(rule, SKIPPED, rule.severity, f"执行被拒（{exc}）", elapsed_ms=elapsed)
+        if exc.kind == "version_mismatch":
+            return Outcome(
+                rule,
+                ERROR,
+                rule.severity,
+                f"SQL 与目标版本不匹配：{exc}。"
+                "规则的列/变量在目标版本不存在——正确做法是在头部用 "
+                "@since/@removed_in 声明适用范围，而不是靠降级掩盖。",
+                elapsed_ms=elapsed,
+            )
         return Outcome(rule, ERROR, rule.severity, str(exc), elapsed_ms=elapsed)
 
     elapsed = (time.perf_counter() - started) * 1000
@@ -172,6 +213,7 @@ def run_rule(rule: Rule, conn, caps: Capabilities, opt: RunOptions, preamble: li
         columns=cols + ["_fingerprint"],
         rows=rows,
         elapsed_ms=elapsed,
+        row_limit=_outer_limit(sql),
     )
 
 

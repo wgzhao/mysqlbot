@@ -47,7 +47,7 @@ cmd_start() {
     echo "== 初始化数据目录 =="
     "$MYSQLD" --initialize-insecure --basedir="$BASEDIR" --datadir="$DATADIR" --log-error="$LOG"
   fi
-  echo "== 启动（socket $SOCK, port $PORT）=="
+  echo "== 启动（socket ${SOCK}, port ${PORT}）=="
   # 关键测试参数：
   #   innodb-buffer-pool-size=32M  让工作集远大于缓冲池，以便复现命中率类规则
   #   performance-schema-consumer-* 打开语句/等待采集

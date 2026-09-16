@@ -19,24 +19,36 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- 错误分类
 
-# 这些错误说明「当前账号看不到/没有这个能力」，属于可降级，不是故障
+# 这两类都表示「当前环境不给这个能力」，可降级为 skipped，不是工具故障。
+#
+# 判据：错误指向的是**对象整体不存在或没权限**，而不是「SQL 的写法与本版本对不上」。
+# 换个账号、装上 sys 库就能解决 → 降级是对的。
 _CAPABILITY_CODES = {
     1044,  # Access denied for user ... to database
     1045,  # Access denied for user (auth)
     1142,  # SELECT command denied
     1143,  # INSERT command denied (理论上不该出现，出现说明账号配错了)
     1227,  # Access denied; you need (at least one of) the PROCESS privilege(s)
-    1146,  # Table doesn't exist  -> 版本差异导致视图不存在
+    1146,  # Table doesn't exist  -> 例如 5.7 没有 performance_schema.data_locks
     1109,  # Unknown table
-    1054,  # Unknown column     -> 版本差异导致列不存在
-    1193,  # Unknown system variable -> 变量在目标版本已移除/尚未引入
-    1231,  # Variable can't be set -> 版本差异
-    1305,  # PROCEDURE/FUNCTION does not exist
+    1305,  # PROCEDURE/FUNCTION does not exist -> sys 库的函数没装
     3167,  # information_schema 相关
 }
 
+# 这一类**不可**降级，必须报 error（自测里是硬失败）。
+#
+# 判据：错误指向的是**某个列/变量在本版本里不存在**，也就是「规则的 SQL 写法与目标
+# 版本对不上」。它永远不该靠降级掩盖——正确的做法是在规则头部补 @since/@removed_in
+# 门禁，让规则在版本不匹配时**主动**声明「本版本不适用」，而不是撞上语法错再假装跳过。
+# 这两者的区别对使用者是决定性的：一个是「你去加权限」，一个是「工具要修」。
+_VERSION_CODES = {
+    1054,  # Unknown column          -> 列在本版本不存在（如 QUERY_SAMPLE_TEXT 是 8.0.22+）
+    1193,  # Unknown system variable -> 变量在本版本不存在（如 binlog_expire_logs_seconds）
+    1231,  # Variable can't be set   -> 会话前导设置了本版本不认的变量
+}
+
 _PERMISSION_CODES = {1044, 1045, 1142, 1143, 1227}
-_SCHEMA_CODES = {1146, 1109, 1054, 1193, 1231, 1305, 3167}
+_SCHEMA_CODES = _CAPABILITY_CODES - _PERMISSION_CODES
 
 
 class QueryError(Exception):
@@ -45,10 +57,16 @@ class QueryError(Exception):
     def __init__(self, message: str, code: int | None = None, kind: str = "other"):
         super().__init__(message)
         self.code = code
-        self.kind = kind  # permission | missing_object | syntax | conn | other
+        # permission | missing_object | version_mismatch | syntax | conn | other
+        self.kind = kind
 
     @property
     def degradable(self) -> bool:
+        """只有「环境不给能力」才允许降级。
+
+        version_mismatch / syntax 是工具自身的缺陷，降级会让报告把「工具坏了」
+        说成「环境限制」，进而把 0 报错的自测变成一句空话。
+        """
         return self.kind in ("permission", "missing_object")
 
 
@@ -59,6 +77,8 @@ def _classify(code: int | None) -> str:
         return "permission"
     if code in _SCHEMA_CODES:
         return "missing_object"
+    if code in _VERSION_CODES:
+        return "version_mismatch"
     if code == 1064:
         return "syntax"
     return "other"
@@ -165,9 +185,13 @@ class CliConn:
     # -- 构造命令行 ---------------------------------------------------
     def _base_cmd(self) -> list[str]:
         t = self.target
-        cmd = [self.binary, "--batch", "--connect-timeout=10"]
+        # 【坑】mysql 客户端要求 --defaults-file 必须是命令行上的**第一个**选项；
+        # 排在别的选项之后时它不再当作"选项文件"，而是被当成系统变量赋值，
+        # 直接报 `unknown variable 'defaults-file=...'`。所以这里必须放在最前面。
+        cmd = [self.binary]
         if t.defaults_file:
             cmd.append(f"--defaults-file={t.defaults_file}")
+        cmd += ["--batch", "--connect-timeout=10"]
         if t.socket:
             cmd.append(f"--socket={t.socket}")
         if t.host:

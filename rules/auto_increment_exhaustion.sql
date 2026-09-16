@@ -9,8 +9,14 @@
 -- @since: 5.7
 -- @tags: schema,capacity
 -- @remediation: 用 int（上限约 21 亿）做自增主键、且写入速率高的表，跑满只是时间问题，而耗尽之后所有 INSERT 会直接失败（error 1062/1467），属于典型"凌晨炸"的故障。到 70% 就该动手：改成 BIGINT UNSIGNED 需要重建表（ALTER TABLE ... MODIFY，配合 pt-online-schema-change 或 gh-ost 减少锁表时间）。
--- @caveats: 已用"峰值超过类型上限的 50%"作为门槛，低于此不报，避免刷屏。判定依据是 information_schema.TABLES.AUTO_INCREMENT，它可能滞后于真实插入位置（缓存分配），因此百分比是估算。另外 AUTO_INCREMENT 会因为删除最大值、回滚、以及 InnoDB 8.0 之前的计数器不持久化而回退，不要在它上面做精确容量规划。
+-- @caveats: 已用"已用百分比超过类型上限的 50%"作为门槛，低于此不报，避免刷屏。判定依据是 information_schema.TABLES.AUTO_INCREMENT，它可能滞后于真实插入位置（缓存分配），因此百分比是估算。另外 AUTO_INCREMENT 会因为删除最大值、回滚、以及 InnoDB 8.0 之前的计数器不持久化而回退，不要在它上面做精确容量规划。用雪花 ID 当主键、或曾被人工改成极大值的表，AUTO_INCREMENT 会在 10^18 量级（bigint unsigned 的 ~11%），此时"百分比"没有实际意义，但它离上限确实还很远，不会命中；若这类表在你的库里很多，把本规则加入 skip。
 -- @ref: -
+--
+-- 【坑·已在 MySQL 8.0.43 上踩到】AUTO_INCREMENT 是 BIGINT UNSIGNED。直接写
+-- `100 * t.AUTO_INCREMENT / max` 时，MySQL 先算 `100 * AUTO_INCREMENT`（仍是
+-- BIGINT UNSIGNED 算术），只要库里存在 AUTO_INCREMENT > 1.84e17 的表（雪花 ID、
+-- 人工跳号），乘法就溢出，整条规则直接抛 error 1690，而不是只影响那一张表。
+-- 所以必须先把两边 CAST 成 DECIMAL 再做算术。
 --
 -- 规则契约：返回 0 行为未命中；返回行即命中，每行必须含 severity 列。
 SELECT
@@ -24,35 +30,38 @@ SELECT
   ROUND(x.used_pct, 2) AS used_pct
 FROM (
   SELECT
-    t.TABLE_SCHEMA,
-    t.TABLE_NAME,
-    c.COLUMN_NAME,
-    c.COLUMN_TYPE,
-    t.AUTO_INCREMENT,
-    CASE
-      WHEN c.DATA_TYPE = 'tinyint'   THEN IF(c.COLUMN_TYPE LIKE '%unsigned%', 255, 127)
-      WHEN c.DATA_TYPE = 'smallint'  THEN IF(c.COLUMN_TYPE LIKE '%unsigned%', 65535, 32767)
-      WHEN c.DATA_TYPE = 'mediumint' THEN IF(c.COLUMN_TYPE LIKE '%unsigned%', 16777215, 8388607)
-      WHEN c.DATA_TYPE = 'int'       THEN IF(c.COLUMN_TYPE LIKE '%unsigned%', 4294967295, 2147483647)
-      WHEN c.DATA_TYPE = 'bigint'    THEN IF(c.COLUMN_TYPE LIKE '%unsigned%', 18446744073709551615, 9223372036854775807)
-    END AS max_val,
-    100 * t.AUTO_INCREMENT /
+    m.TABLE_SCHEMA,
+    m.TABLE_NAME,
+    m.COLUMN_NAME,
+    m.COLUMN_TYPE,
+    m.AUTO_INCREMENT,
+    m.max_val,
+    CAST(m.AUTO_INCREMENT AS DECIMAL(30, 0)) * 100
+      / NULLIF(CAST(m.max_val AS DECIMAL(30, 0)), 0) AS used_pct
+  FROM (
+    SELECT
+      t.TABLE_SCHEMA,
+      t.TABLE_NAME,
+      c.COLUMN_NAME,
+      c.COLUMN_TYPE,
+      t.AUTO_INCREMENT,
       CASE
         WHEN c.DATA_TYPE = 'tinyint'   THEN IF(c.COLUMN_TYPE LIKE '%unsigned%', 255, 127)
         WHEN c.DATA_TYPE = 'smallint'  THEN IF(c.COLUMN_TYPE LIKE '%unsigned%', 65535, 32767)
         WHEN c.DATA_TYPE = 'mediumint' THEN IF(c.COLUMN_TYPE LIKE '%unsigned%', 16777215, 8388607)
         WHEN c.DATA_TYPE = 'int'       THEN IF(c.COLUMN_TYPE LIKE '%unsigned%', 4294967295, 2147483647)
         WHEN c.DATA_TYPE = 'bigint'    THEN IF(c.COLUMN_TYPE LIKE '%unsigned%', 18446744073709551615, 9223372036854775807)
-      END AS used_pct
-  FROM information_schema.TABLES t
-  JOIN information_schema.COLUMNS c
-    ON c.TABLE_SCHEMA = t.TABLE_SCHEMA
-   AND c.TABLE_NAME   = t.TABLE_NAME
-   AND c.EXTRA LIKE '%auto_increment%'
-  WHERE t.TABLE_TYPE = 'BASE TABLE'
-    AND t.AUTO_INCREMENT IS NOT NULL
-    AND t.AUTO_INCREMENT > 1
-    AND t.TABLE_SCHEMA NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys')
+      END AS max_val
+    FROM information_schema.TABLES t
+    JOIN information_schema.COLUMNS c
+      ON c.TABLE_SCHEMA = t.TABLE_SCHEMA
+     AND c.TABLE_NAME   = t.TABLE_NAME
+     AND c.EXTRA LIKE '%auto_increment%'
+    WHERE t.TABLE_TYPE = 'BASE TABLE'
+      AND t.AUTO_INCREMENT IS NOT NULL
+      AND t.AUTO_INCREMENT > 1
+      AND t.TABLE_SCHEMA NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys')
+  ) m
 ) x
 WHERE x.max_val IS NOT NULL
   AND x.used_pct >= 50

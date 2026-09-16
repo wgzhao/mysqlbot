@@ -1,6 +1,6 @@
 # mysqlbot 规则目录
 
-共 **41** 条规则。本文件由 `mbot docs` 从每条规则头部的元数据生成，请勿手工编辑——改规则后重新生成即可。
+共 **42** 条规则。本文件由 `mbot docs` 从每条规则头部的元数据生成，请勿手工编辑——改规则后重新生成即可。
 
 ## 阅读约定
 
@@ -21,7 +21,7 @@
 |---|---|---|---|---|---|---|---|
 | critical | [`replication_io_error`](#replication_io_error) | risk | cluster | `replication` | catalog | 5.7 | p_s, replication |
 | critical | [`replication_stopped`](#replication_stopped) | risk | cluster | `replication` | catalog | 5.7 | p_s, replication |
-| warn | [`binlog_retention_unbounded`](#binlog_retention_unbounded) | capacity | instance | `setting:binlog_expire_logs_seconds` | exact | 8.0 | - |
+| warn | [`binlog_retention_unbounded`](#binlog_retention_unbounded) | capacity | instance | `setting:binlog_expire_logs_seconds` | exact | 8.0 | p_s |
 | warn | [`binlog_retention_unbounded_57`](#binlog_retention_unbounded_57) | capacity | instance | `setting:expire_logs_days` | exact | 5.7 | - |
 | warn | [`buffer_pool_undersized`](#buffer_pool_undersized) | capacity | schema | `setting:innodb_buffer_pool_size` | catalog | 5.7 | p_s, schema_select |
 | warn | [`connection_headroom_low`](#connection_headroom_low) | capacity | instance | `setting:max_connections` | cumulative | 5.7 | p_s |
@@ -33,11 +33,12 @@
 | warn | [`innodb_log_waits`](#innodb_log_waits) | latency | instance | `setting:innodb_redo_log_capacity` | cumulative | 5.7 | p_s |
 | warn | [`tmp_table_disk_spill`](#tmp_table_disk_spill) | latency | workload | `setting:tmp_table_size` | cumulative | 5.7 | p_s |
 | warn | [`blocking_chains`](#blocking_chains) | risk | workload | `trx` | catalog | 8.0 | p_s_locks, process |
+| warn | [`blocking_chains_57`](#blocking_chains_57) | risk | workload | `trx` | catalog | 5.7 | process |
 | warn | [`connection_saturation`](#connection_saturation) | risk | workload | `setting:max_connections` | cumulative | 5.7 | p_s |
-| warn | [`idle_in_transaction`](#idle_in_transaction) | risk | workload | `trx` | catalog | 5.7 | p_s, process |
+| warn | [`idle_in_transaction`](#idle_in_transaction) | risk | workload | `trx` | catalog | 5.7 | process |
 | warn | [`log_bin_off`](#log_bin_off) | risk | instance | `setting:log_bin` | exact | 5.7 | - |
-| warn | [`long_running_transaction`](#long_running_transaction) | risk | workload | `trx` | catalog | 5.7 | p_s, process |
-| warn | [`metadata_lock_wait`](#metadata_lock_wait) | risk | workload | `table` | catalog | 8.0 | p_s_mdl, process |
+| warn | [`long_running_transaction`](#long_running_transaction) | risk | workload | `trx` | catalog | 5.7 | process |
+| warn | [`metadata_lock_wait`](#metadata_lock_wait) | risk | workload | `table` | catalog | 5.7 | p_s_mdl, process |
 | warn | [`non_innodb_table`](#non_innodb_table) | risk | schema | `table` | catalog | 5.7 | schema_select |
 | warn | [`replica_writable`](#replica_writable) | risk | cluster | `replication` | catalog | 5.7 | p_s, replication |
 | warn | [`sync_binlog_not_1`](#sync_binlog_not_1) | risk | instance | `setting:sync_binlog` | exact | 5.7 | - |
@@ -108,7 +109,7 @@ ORDER BY c.CHANNEL_NAME
 
 **处置**：LAST_ERROR_NUMBER 非零说明 SQL 线程因冲突/约束失败而停：先看 LAST_ERROR_MESSAGE，判断是数据不一致还是 DDL 顺序问题，修好后再 START REPLICA。SERVICE_STATE='OFF' 且无错误，通常是有人手动 STOP REPLICA 或 gtid 断档，先确认为什么停的，别直接拉起来。
 
-**注意（误报条件与局限）**：本规则只覆盖 applier（SQL）线程。IO 线程的故障见 replication_io_error。在非复制实例上，performance_schema.replication_applier_status_by_worker 是空表，本规则返回 0 行——空不等于健康，只表示"这台不是从库"。读取 P_S 复制表需要 REPLICATION CLIENT 权限，缺权限时规则会被跳过而不是误报干净。
+**注意（误报条件与局限）**：本规则只覆盖 applier（SQL）线程。IO 线程的故障见 replication_io_error。在非复制实例上，performance_schema.replication_applier_status_by_worker 是空表，本规则返回 0 行——空不等于健康，只表示"这台不是从库"。读取 P_S 复制表需要 REPLICATION CLIENT 权限，缺权限时规则会被跳过而不是误报干净。**只选 5.7 / 8.0 / 8.4 三版都有交集的列**，这是刻意的：这个表的列名改过两次——LAST_SEEN_TRANSACTION（5.7 有，8.0 移除）、APPLYING_TRANSACTION 与 APPLYING_TRANSACTION_RETRIES_COUNT（8.0 才加）；引用任何一侧都会让规则在另一侧报 1054 而整条失效。代价是拿不到"正在应用哪个事务/重试了几次"，需要这些细节时按版本单独查：5.7 看 LAST_SEEN_TRANSACTION，8.0+ 看 LAST_APPLIED_TRANSACTION / APPLYING_TRANSACTION / APPLYING_TRANSACTION_RETRIES_COUNT。
 
 <details><summary>SQL</summary>
 
@@ -120,9 +121,7 @@ SELECT
   w.SERVICE_STATE                      AS service_state,
   w.LAST_ERROR_NUMBER                  AS last_error_number,
   LEFT(w.LAST_ERROR_MESSAGE, 240)      AS last_error_message,
-  w.LAST_ERROR_TIMESTAMP               AS last_error_at,
-  w.APPLYING_TRANSACTION_RETRIES_COUNT AS retries,
-  LEFT(w.APPLYING_TRANSACTION, 80)     AS applying_transaction
+  w.LAST_ERROR_TIMESTAMP               AS last_error_at
 FROM performance_schema.replication_applier_status_by_worker w
 WHERE w.LAST_ERROR_NUMBER <> 0
    OR w.SERVICE_STATE <> 'ON'
@@ -137,13 +136,13 @@ ORDER BY w.CHANNEL_NAME, w.WORKER_ID
 
 - 严重度 `warn` · 维度 `capacity` · 作用域 `instance` · 对象 `setting:binlog_expire_logs_seconds`
 - 精确度 `exact` · 起始版本 `8.0`
-- 依赖能力位：无
+- 依赖能力位：`p_s`
 - 参考：-
 - 标签：binlog, capacity
 
-**处置**：log_bin=ON 但过期时间被显式设为 0，等于"永远不删 binlog"，写入量大的实例迟早把数据盘写满，而磁盘写满会连带 InnoDB 无法刷盘、实例整体不可写。设置 binlog_expire_logs_seconds 为一个与"最长可接受恢复点"匹配的值（默认 2592000 = 30 天）。设置过短会让从库断档后无法重连（需要的 binlog 已被删）——设之前先确认最长的主从延迟与备份窗口。
+**处置**：log_bin=ON 但过期时间被显式设为 0（或自动清理被关掉），等于"永远不删 binlog"，写入量大的实例迟早把数据盘写满，而磁盘写满会连带 InnoDB 无法刷盘、实例整体不可写。设置 binlog_expire_logs_seconds 为一个与"最长可接受恢复点"匹配的值（默认 2592000 = 30 天），并确保 binlog_expire_logs_auto_purge=ON。设置过短会让从库断档后无法重连（需要的 binlog 已被删）——设之前先确认最长的主从延迟与备份窗口。
 
-**注意（误报条件与局限）**：MySQL 8.0 中 binlog_expire_logs_seconds 优先于已废弃的 expire_logs_days，前者非零时后者被忽略，所以本规则只看前者的值。8.0 之前的版本用 expire_logs_days，见 binlog_retention_unbounded_57。该规则不判断磁盘实际使用率：磁盘更大、写入更少的实例可能永远撑不满，此时把规则加入 skip 而不是改参数。
+**注意（误报条件与局限）**：MySQL 8.0 中 binlog_expire_logs_seconds 优先于已废弃的 expire_logs_days，前者非零时后者被忽略，所以本规则只看前者的值。8.0 之前的版本用 expire_logs_days，见 binlog_retention_unbounded_57。**版本边界**：binlog_expire_logs_auto_purge 是 8.0.29 才引入的变量，在 8.0.0~8.0.28 上不存在；规则改为从 performance_schema.global_variables 取值并在缺失时按 'ON' 处理（那之前的版本只要 seconds 非零就会清理），因此不会在旧 8.0 上被 1193 拒绝。该规则不判断磁盘实际使用率：磁盘更大、写入更少的实例可能永远撑不满，此时把规则加入 skip 而不是改参数。
 
 <details><summary>SQL</summary>
 
@@ -151,13 +150,23 @@ ORDER BY w.CHANNEL_NAME, w.WORKER_ID
 SELECT
   'warn'                            AS severity,
   'binlog_expire_logs_seconds'      AS variable_name,
-  @@binlog_expire_logs_seconds      AS current_seconds,
+  v.secs                            AS current_seconds,
   '2592000 (30 天)'                 AS suggested_value,
-  @@log_bin                         AS log_bin,
-  @@binlog_expire_logs_auto_purge   AS auto_purge
-FROM DUAL
-WHERE @@log_bin <> 0
-  AND @@binlog_expire_logs_seconds = 0
+  v.log_bin                         AS log_bin,
+  COALESCE(ap.VARIABLE_VALUE, 'ON') AS auto_purge,
+  CASE
+    WHEN COALESCE(ap.VARIABLE_VALUE, 'ON') = 'OFF'
+      THEN 'binlog_expire_logs_auto_purge=OFF：过期时间被完全忽略，binlog 永不自动清理'
+    ELSE 'binlog_expire_logs_seconds=0：没有设置过期时间'
+  END                               AS hit_reason
+FROM (
+  SELECT @@log_bin AS log_bin, @@binlog_expire_logs_seconds AS secs
+) v
+LEFT JOIN performance_schema.global_variables ap
+       ON ap.VARIABLE_NAME = 'binlog_expire_logs_auto_purge'
+WHERE v.log_bin <> 0
+  AND (v.secs = 0
+       OR COALESCE(ap.VARIABLE_VALUE, 'ON') = 'OFF')
 ```
 
 </details>
@@ -621,6 +630,84 @@ ORDER BY w.wait_s DESC
 
 </details>
 
+## blocking_chains_57
+
+**存在行锁等待链（5.7 路径）**
+
+- 严重度 `warn` · 维度 `risk` · 作用域 `workload` · 对象 `trx`
+- 精确度 `catalog` · 起始版本 `5.7` · 移除于 `8.0`
+- 依赖能力位：`process`
+- 参考：pgbot/blocking_chains
+- 标签：lock, innodb
+
+**处置**：先看 blocking 侧的 SQL：通常是缺索引导致锁范围放大（本该锁一行却锁了一片），或批量更新没有按主键排序造成交叉死锁。定位到阻塞方后，优先 kill 阻塞方而不是等待方——等待方往往是无辜的业务请求。真正要修的是阻塞方那条 SQL 的加锁范围。
+
+**注意（误报条件与局限）**：这是 8.0 版 blocking_chains 的 5.7 变体。8.0 移除了 information_schema.INNODB_LOCKS 与 INNODB_LOCK_WAITS（改用 performance_schema.data_locks / data_lock_waits），所以两个版本必须用两套 SQL——规则用 @since/@removed_in 门禁，同一实例上只会启用其中一条，不会重复报。5.7 的 INNODB_LOCKS 只包含"正在等待的锁"和"正在阻塞别人的锁"，不含全部锁，这正好就是本规则关心的那部分。locked_schema / locked_table 由 LOCK_TABLE 按第一个点号切开，库名或表名里含点号时会切错——这种命名极少见，但看到可疑结果时以 LOCK_TABLE 原文为准。等待时长取自 TRX_WAIT_STARTED，该列在事务开始等待时才被赋值。已用"等待 >= 10 秒"过滤瞬时争用。INNODB_LOCKS 在 5.7 已是 deprecated 的 I_S 表，实例日志里可能有弃用告警，与本规则无关；它返回 0 行时不代表没有锁竞争，只代表此刻没有等待链。
+
+**⚠️ 含可执行语句**：`KILL <blocking_pid>` — 证据列 suggested_kill 是一个可直接执行的 KILL 语句。kill 会回滚阻塞方未提交的事务——先确认那不是一个正在跑的关键批处理，否则会把一次"等待"变成一次"业务失败"。
+
+<details><summary>SQL</summary>
+
+```sql
+SELECT
+  CASE WHEN w.wait_s >= 300 THEN 'critical' ELSE 'warn' END AS severity,
+  w.locked_schema   AS locked_schema,
+  w.locked_table    AS locked_table,
+  w.locked_index    AS locked_index,
+  w.locked_type     AS locked_type,
+  w.lock_mode       AS waiting_lock_mode,
+  w.lock_data       AS waiting_lock_data,
+  w.wait_s          AS wait_seconds,
+  w.waiting_pid     AS waiting_pid,
+  w.waiting_user    AS waiting_user,
+  w.waiting_query   AS waiting_query,
+  w.blocking_pid    AS blocking_pid,
+  w.blocking_user   AS blocking_user,
+  w.blocking_query  AS blocking_query,
+  w.blocking_trx    AS blocking_trx_id,
+  w.blocking_age_s  AS blocking_trx_age_seconds,
+  w.kill_blocker    AS suggested_kill
+FROM (
+  SELECT
+    REPLACE(SUBSTRING_INDEX(rl.LOCK_TABLE, '.', 1), '`', '')  AS locked_schema,
+    REPLACE(SUBSTRING_INDEX(rl.LOCK_TABLE, '.', -1), '`', '') AS locked_table,
+    rl.LOCK_INDEX                                             AS locked_index,
+    rl.LOCK_TYPE                                              AS locked_type,
+    rl.LOCK_MODE                                              AS lock_mode,
+    LEFT(rl.LOCK_DATA, 80)                                    AS lock_data,
+    TIMESTAMPDIFF(SECOND, wt.TRX_WAIT_STARTED, NOW())         AS wait_s,
+    wt.TRX_MYSQL_THREAD_ID                                    AS waiting_pid,
+    wp.USER                                                   AS waiting_user,
+    LEFT(COALESCE(wt.TRX_QUERY, wp.INFO), 200)                 AS waiting_query,
+    bt.TRX_MYSQL_THREAD_ID                                    AS blocking_pid,
+    bp.USER                                                   AS blocking_user,
+    LEFT(COALESCE(bt.TRX_QUERY, bp.INFO), 200)                 AS blocking_query,
+    bt.TRX_ID                                                 AS blocking_trx,
+    TIMESTAMPDIFF(SECOND, bt.TRX_STARTED, NOW())              AS blocking_age_s,
+    CASE WHEN bt.TRX_MYSQL_THREAD_ID IS NULL
+         THEN '(阻塞事务没有对应会话，无法 KILL——多半是已断开的连接残留)'
+         ELSE CONCAT('KILL ', bt.TRX_MYSQL_THREAD_ID, ';')
+    END                                                       AS kill_blocker
+  FROM information_schema.INNODB_LOCK_WAITS lw
+  JOIN information_schema.INNODB_LOCKS rl
+    ON rl.LOCK_ID = lw.REQUESTED_LOCK_ID
+  JOIN information_schema.INNODB_TRX wt
+    ON wt.TRX_ID = lw.REQUESTING_TRX_ID
+  JOIN information_schema.INNODB_TRX bt
+    ON bt.TRX_ID = lw.BLOCKING_TRX_ID
+  LEFT JOIN (SELECT ID, USER, INFO FROM information_schema.PROCESSLIST) wp
+    ON wp.ID = wt.TRX_MYSQL_THREAD_ID
+  LEFT JOIN (SELECT ID, USER, INFO FROM information_schema.PROCESSLIST) bp
+    ON bp.ID = bt.TRX_MYSQL_THREAD_ID
+) w
+WHERE w.wait_s >= 10
+  AND (w.waiting_user IS NULL
+       OR w.waiting_user <> SUBSTRING_INDEX(CURRENT_USER(), '@', 1))
+ORDER BY w.wait_s DESC
+```
+
+</details>
+
 ## connection_saturation
 
 **连接数接近上限**
@@ -676,12 +763,12 @@ WHERE raw.max_connections > 0
 
 - 严重度 `warn` · 维度 `risk` · 作用域 `workload` · 对象 `trx`
 - 精确度 `catalog` · 起始版本 `5.7`
-- 依赖能力位：`p_s`, `process`
+- 依赖能力位：`process`
 - 参考：pgbot/idle_in_transaction
 
 **处置**：典型成因是应用取了连接、开了事务却忘了 commit/rollback（例如异常分支没有回滚）。它比长事务更隐蔽：CPU 和 QPS 都看不出来，但 purge 被卡住、undo 持续增长、行锁一直不释放。
 
-**注意（误报条件与局限）**：判定依据是 TRX_STATE='RUNNING' 且 TRX_QUERY 为空——事务活着但此刻没有语句在跑。应用连接池在两条语句之间也会短暂呈现该状态，因此已用 60 秒做门禁。MySQL 不暴露"事务从何时开始空闲"，open_seconds 是事务总年龄，是空闲时长的上界。
+**注意（误报条件与局限）**：判定依据是 TRX_STATE='RUNNING' 且 TRX_QUERY 为空——事务活着但此刻没有语句在跑。应用连接池在两条语句之间也会短暂呈现该状态，因此已用 60 秒做门禁。MySQL 不暴露"事务从何时开始空闲"，open_seconds 是事务总年龄，是空闲时长的上界。取会话的用户/来源走 information_schema.PROCESSLIST（只需 PROCESS），不用 performance_schema.threads——后者要 SELECT ON performance_schema.*，业务账号通常没有，用它会整条规则被拒。
 
 <details><summary>SQL</summary>
 
@@ -701,12 +788,12 @@ FROM (
     trx.trx_started                                AS started_at,
     TIMESTAMPDIFF(SECOND, trx.trx_started, NOW())   AS open_s,
     trx.trx_mysql_thread_id                         AS thread_id,
-    th.PROCESSLIST_USER                             AS db_user,
-    th.PROCESSLIST_HOST                             AS client_host,
+    pl.USER                                         AS db_user,
+    pl.HOST                                         AS client_host,
     trx.trx_rows_locked                             AS rows_locked
   FROM information_schema.INNODB_TRX trx
-  LEFT JOIN performance_schema.threads th
-         ON th.PROCESSLIST_ID = trx.trx_mysql_thread_id
+  LEFT JOIN information_schema.PROCESSLIST pl
+         ON pl.ID = trx.trx_mysql_thread_id
   WHERE trx.trx_state = 'RUNNING'
     AND trx.trx_query IS NULL
 ) t
@@ -755,12 +842,12 @@ WHERE @@log_bin = 0
 
 - 严重度 `warn` · 维度 `risk` · 作用域 `workload` · 对象 `trx`
 - 精确度 `catalog` · 起始版本 `5.7`
-- 依赖能力位：`p_s`, `process`
+- 依赖能力位：`process`
 - 参考：pgbot/long_running_transaction
 
 **处置**：长事务会阻止 InnoDB purge、放大 undo 体积、并长时间持有行锁。先确认是应用漏了 commit（最常见）、还是批量任务本身过大（拆分批次）。必要时 kill 前务必确认会话用途。
 
-**注意（误报条件与局限）**：大批量导入/DDL 期间长事务是预期的；只读长事务不发警告的前提是它不持有 undo，但 InnoDB 里无法区分，因此一律报出。
+**注意（误报条件与局限）**：大批量导入/DDL 期间长事务是预期的；只读长事务不发警告的前提是它不持有 undo，但 InnoDB 里无法区分，因此一律报出。取会话的用户/来源走 information_schema.PROCESSLIST 而不是 performance_schema.threads——后者需要 SELECT ON performance_schema.*，而业务账号通常没有，一旦用它会整条规则被拒（1142）、白白丢掉这条高价值发现；PROCESSLIST 在 5.7/8.0/8.4 都只需 PROCESS 即可看到全部会话。
 
 <details><summary>SQL</summary>
 
@@ -783,14 +870,14 @@ FROM (
     trx.trx_started                              AS started_at,
     TIMESTAMPDIFF(SECOND, trx.trx_started, NOW()) AS age_s,
     trx.trx_mysql_thread_id                       AS thread_id,
-    th.PROCESSLIST_USER                           AS db_user,
-    th.PROCESSLIST_HOST                           AS client_host,
+    pl.USER                                       AS db_user,
+    pl.HOST                                       AS client_host,
     trx.trx_rows_locked                           AS rows_locked,
     trx.trx_rows_modified                         AS rows_modified,
     LEFT(COALESCE(trx.trx_query, '(idle)'), 200)  AS query_head
   FROM information_schema.INNODB_TRX trx
-  LEFT JOIN performance_schema.threads th
-         ON th.PROCESSLIST_ID = trx.trx_mysql_thread_id
+  LEFT JOIN information_schema.PROCESSLIST pl
+         ON pl.ID = trx.trx_mysql_thread_id
 ) t
 WHERE t.age_s >= 300
   AND (t.db_user IS NULL
@@ -805,13 +892,13 @@ ORDER BY t.age_s DESC
 **存在元数据锁（MDL）等待**
 
 - 严重度 `warn` · 维度 `risk` · 作用域 `workload` · 对象 `table`
-- 精确度 `catalog` · 起始版本 `8.0`
+- 精确度 `catalog` · 起始版本 `5.7`
 - 依赖能力位：`p_s_mdl`, `process`
 - 参考：-
 
 **处置**：MDL 等待意味着有 DDL 在排队，而它后面所有访问该表的事务都会被一起堵住——这是 MySQL 最典型的"一个 ALTER 搞挂整个库"。查 blocking_pids 找出持锁的长事务或未提交事务，先处理它们，DDL 才能继续。
 
-**注意（误报条件与局限）**：只报"同一对象上既有 PENDING 锁又有 GRANTED 锁"的情况，即真正的争用，不报瞬间过路的排队；OBJECT_TYPE 为 GLOBAL 的锁会在 FLUSH TABLES 时瞬时出现，已排除。5.7 无 performance_schema.metadata_locks，该规则在 5.7 上不可用。
+**注意（误报条件与局限）**：只报"同一对象上既有 PENDING 锁又有 GRANTED 锁"的情况，即真正的争用，不报瞬间过路的排队；OBJECT_TYPE 为 GLOBAL 的锁会在 FLUSH TABLES 时瞬时出现，已排除。performance_schema.metadata_locks 自 5.7.3 起就存在（不是 8.0 专属），本规则用的 OBJECT_TYPE/OBJECT_SCHEMA/OBJECT_NAME/LOCK_STATUS/OWNER_THREAD_ID 五个列 5.7 也都有，因此 5.7/8.0/8.4 通用。注意 P_S 的 metadata_locks 表需要 metadata_locks 这个 instrument 被打开（默认开），关掉它本规则会静默返回 0 行。
 
 <details><summary>SQL</summary>
 
@@ -1379,7 +1466,7 @@ WHERE UPPER(COALESCE(r.log_bin, 'OFF')) IN ('ON', '1')
 
 **处置**：按 digest 拿到样本 SQL 后，重点看两件事：WHERE 列有没有索引、以及索引是否因为隐式类型转换（列是 varchar 却比数字）而失效。扫描行数极大而返回行数极小，是最典型的"缺索引"信号。
 
-**注意（误报条件与局限）**：直接读 events_statements_summary_by_digest 而不是 sys 视图，是为了拿到精确的数值列——sys 视图里的 *_latency 是格式化字符串，按它排序会得到错误的名次。digest 表在 P_S 启动后才有数据，刚重启的实例这里会是空的（此时报"干净"是假干净）。语句摘要受 performance_schema_digests_size 限制，超限语句会归到 digest='' 的汇总行，本规则已排除该行。
+**注意（误报条件与局限）**：直接读 events_statements_summary_by_digest 而不是 sys 视图，是为了拿到精确的数值列——sys 视图里的 *_latency 是格式化字符串，按它排序会得到错误的名次。digest 表在 P_S 启动后才有数据，刚重启的实例这里会是空的（此时报"干净"是假干净）。语句摘要受 performance_schema_digests_size 限制，超限语句会归到 digest='' 的汇总行，本规则已排除该行。样本列取 DIGEST_TEXT 而非 QUERY_SAMPLE_TEXT：后者是 8.0.22 才加的列，用它会让本规则在 5.7 上直接报 1054；DIGEST_TEXT 从 5.7 起一直存在，跨版本可用。代价是拿到的是参数已被 `?` 替换的规范化文本，看不到字面值——需要字面值时按 digest 去 P_S 或慢日志里捞。
 
 <details><summary>SQL</summary>
 
@@ -1393,7 +1480,7 @@ SELECT
   ROUND(d.SUM_ROWS_EXAMINED / NULLIF(d.COUNT_STAR, 0), 0)       AS rows_examined_avg,
   ROUND(d.SUM_ROWS_SENT / NULLIF(d.COUNT_STAR, 0), 0)           AS rows_sent_avg,
   d.SUM_ROWS_EXAMINED                                          AS rows_examined_total,
-  LEFT(COALESCE(d.QUERY_SAMPLE_TEXT, d.DIGEST_TEXT), 160)       AS query_sample,
+  LEFT(d.DIGEST_TEXT, 160)                                      AS query_sample,
   d.DIGEST                                                     AS digest
 FROM performance_schema.events_statements_summary_by_digest d
 WHERE d.DIGEST_TEXT IS NOT NULL
@@ -1575,7 +1662,7 @@ SELECT
   s.COLUMN_NAME  AS leading_column,
   s.CARDINALITY  AS cardinality,
   t.TABLE_ROWS   AS estimated_rows,
-  'ANALYZE TABLE `' || s.TABLE_SCHEMA || '`.`' || s.TABLE_NAME || '`' AS suggested_fix
+  CONCAT('ANALYZE TABLE `', s.TABLE_SCHEMA, '`.`', s.TABLE_NAME, '`') AS suggested_fix
 FROM information_schema.STATISTICS s
 JOIN information_schema.TABLES t
   ON t.TABLE_SCHEMA = s.TABLE_SCHEMA
@@ -1605,7 +1692,7 @@ LIMIT 50
 
 **处置**：这是"总时间"榜而不是"单次"榜：一条 5ms 的语句跑 100 万次，比一条 3s 的语句跑 10 次更值得先优化。先确认它是否高频且可以缓存/合并，再看执行计划能否降低单次成本。
 
-**注意（误报条件与局限）**：SUM_TIMER_WAIT 单位是皮秒。已过滤系统 schema 与 digest 为空的汇总行。P_S 只保留受 performance_schema_digests_size 限制的 top 语句，超出的会汇总到 digest='' 行——所以这里看到的是"P_S 认为的 top"，不是绝对 top。CPU 时间列需要 performance_schema 的 CPU 计时 consumer。
+**注意（误报条件与局限）**：SUM_TIMER_WAIT 单位是皮秒。已过滤系统 schema 与 digest 为空的汇总行。P_S 只保留受 performance_schema_digests_size 限制的 top 语句，超出的会汇总到 digest='' 行——所以这里看到的是"P_S 认为的 top"，不是绝对 top。CPU 时间列需要 performance_schema 的 CPU 计时 consumer。样本列取 DIGEST_TEXT 而非 QUERY_SAMPLE_TEXT（后者是 8.0.22+ 才有，用它会让本规则在 5.7 上报 1054）。
 
 <details><summary>SQL</summary>
 
@@ -1621,7 +1708,7 @@ SELECT
   d.SUM_ROWS_EXAMINED                                    AS rows_examined_total,
   d.SUM_CREATED_TMP_DISK_TABLES                          AS tmp_disk_tables,
   d.SUM_SORT_MERGE_PASSES                                AS sort_merge_passes,
-  LEFT(COALESCE(d.QUERY_SAMPLE_TEXT, d.DIGEST_TEXT), 160) AS query_sample,
+  LEFT(d.DIGEST_TEXT, 160)                               AS query_sample,
   d.DIGEST                                               AS digest
 FROM performance_schema.events_statements_summary_by_digest d
 WHERE d.DIGEST_TEXT IS NOT NULL
@@ -1744,7 +1831,7 @@ WHERE r.conns > 1000
 
 **处置**：用 int（上限约 21 亿）做自增主键、且写入速率高的表，跑满只是时间问题，而耗尽之后所有 INSERT 会直接失败（error 1062/1467），属于典型"凌晨炸"的故障。到 70% 就该动手：改成 BIGINT UNSIGNED 需要重建表（ALTER TABLE ... MODIFY，配合 pt-online-schema-change 或 gh-ost 减少锁表时间）。
 
-**注意（误报条件与局限）**：已用"峰值超过类型上限的 50%"作为门槛，低于此不报，避免刷屏。判定依据是 information_schema.TABLES.AUTO_INCREMENT，它可能滞后于真实插入位置（缓存分配），因此百分比是估算。另外 AUTO_INCREMENT 会因为删除最大值、回滚、以及 InnoDB 8.0 之前的计数器不持久化而回退，不要在它上面做精确容量规划。
+**注意（误报条件与局限）**：已用"已用百分比超过类型上限的 50%"作为门槛，低于此不报，避免刷屏。判定依据是 information_schema.TABLES.AUTO_INCREMENT，它可能滞后于真实插入位置（缓存分配），因此百分比是估算。另外 AUTO_INCREMENT 会因为删除最大值、回滚、以及 InnoDB 8.0 之前的计数器不持久化而回退，不要在它上面做精确容量规划。用雪花 ID 当主键、或曾被人工改成极大值的表，AUTO_INCREMENT 会在 10^18 量级（bigint unsigned 的 ~11%），此时"百分比"没有实际意义，但它离上限确实还很远，不会命中；若这类表在你的库里很多，把本规则加入 skip。
 
 <details><summary>SQL</summary>
 
@@ -1760,35 +1847,38 @@ SELECT
   ROUND(x.used_pct, 2) AS used_pct
 FROM (
   SELECT
-    t.TABLE_SCHEMA,
-    t.TABLE_NAME,
-    c.COLUMN_NAME,
-    c.COLUMN_TYPE,
-    t.AUTO_INCREMENT,
-    CASE
-      WHEN c.DATA_TYPE = 'tinyint'   THEN IF(c.COLUMN_TYPE LIKE '%unsigned%', 255, 127)
-      WHEN c.DATA_TYPE = 'smallint'  THEN IF(c.COLUMN_TYPE LIKE '%unsigned%', 65535, 32767)
-      WHEN c.DATA_TYPE = 'mediumint' THEN IF(c.COLUMN_TYPE LIKE '%unsigned%', 16777215, 8388607)
-      WHEN c.DATA_TYPE = 'int'       THEN IF(c.COLUMN_TYPE LIKE '%unsigned%', 4294967295, 2147483647)
-      WHEN c.DATA_TYPE = 'bigint'    THEN IF(c.COLUMN_TYPE LIKE '%unsigned%', 18446744073709551615, 9223372036854775807)
-    END AS max_val,
-    100 * t.AUTO_INCREMENT /
+    m.TABLE_SCHEMA,
+    m.TABLE_NAME,
+    m.COLUMN_NAME,
+    m.COLUMN_TYPE,
+    m.AUTO_INCREMENT,
+    m.max_val,
+    CAST(m.AUTO_INCREMENT AS DECIMAL(30, 0)) * 100
+      / NULLIF(CAST(m.max_val AS DECIMAL(30, 0)), 0) AS used_pct
+  FROM (
+    SELECT
+      t.TABLE_SCHEMA,
+      t.TABLE_NAME,
+      c.COLUMN_NAME,
+      c.COLUMN_TYPE,
+      t.AUTO_INCREMENT,
       CASE
         WHEN c.DATA_TYPE = 'tinyint'   THEN IF(c.COLUMN_TYPE LIKE '%unsigned%', 255, 127)
         WHEN c.DATA_TYPE = 'smallint'  THEN IF(c.COLUMN_TYPE LIKE '%unsigned%', 65535, 32767)
         WHEN c.DATA_TYPE = 'mediumint' THEN IF(c.COLUMN_TYPE LIKE '%unsigned%', 16777215, 8388607)
         WHEN c.DATA_TYPE = 'int'       THEN IF(c.COLUMN_TYPE LIKE '%unsigned%', 4294967295, 2147483647)
         WHEN c.DATA_TYPE = 'bigint'    THEN IF(c.COLUMN_TYPE LIKE '%unsigned%', 18446744073709551615, 9223372036854775807)
-      END AS used_pct
-  FROM information_schema.TABLES t
-  JOIN information_schema.COLUMNS c
-    ON c.TABLE_SCHEMA = t.TABLE_SCHEMA
-   AND c.TABLE_NAME   = t.TABLE_NAME
-   AND c.EXTRA LIKE '%auto_increment%'
-  WHERE t.TABLE_TYPE = 'BASE TABLE'
-    AND t.AUTO_INCREMENT IS NOT NULL
-    AND t.AUTO_INCREMENT > 1
-    AND t.TABLE_SCHEMA NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys')
+      END AS max_val
+    FROM information_schema.TABLES t
+    JOIN information_schema.COLUMNS c
+      ON c.TABLE_SCHEMA = t.TABLE_SCHEMA
+     AND c.TABLE_NAME   = t.TABLE_NAME
+     AND c.EXTRA LIKE '%auto_increment%'
+    WHERE t.TABLE_TYPE = 'BASE TABLE'
+      AND t.AUTO_INCREMENT IS NOT NULL
+      AND t.AUTO_INCREMENT > 1
+      AND t.TABLE_SCHEMA NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys')
+  ) m
 ) x
 WHERE x.max_val IS NOT NULL
   AND x.used_pct >= 50

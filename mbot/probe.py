@@ -28,8 +28,16 @@ _PROBES: list[tuple[str, str, str]] = [
         "SELECT 1 FROM performance_schema.table_io_waits_summary_by_index_usage LIMIT 1",
         "索引 IO 统计不可读",
     ),
-    ("p_s_mdl", "SELECT 1 FROM performance_schema.metadata_locks LIMIT 1", "元数据锁表不可读"),
-    ("p_s_locks", "SELECT 1 FROM performance_schema.data_locks LIMIT 1", "data_locks 不可读（8.0+）"),
+    ("p_s_mdl", "SELECT 1 FROM performance_schema.metadata_locks LIMIT 1", "元数据锁表不可读（5.7.3+ 才有此表）"),
+    # 5.7 根本没有 data_locks 这个表（锁信息在 information_schema.INNODB_LOCKS），
+    # 所以这条在 5.7 上必然是关的——那是版本差异，不是权限问题。措辞要能同时说清两者，
+    # 否则在 5.7 上会被误读成"去补 performance_schema 权限就能开"。
+    (
+        "p_s_locks",
+        "SELECT 1 FROM performance_schema.data_locks LIMIT 1",
+        "data_locks 不可读（5.7 无此表，走 information_schema.INNODB_LOCKS；"
+        "8.0+ 需显式 GRANT SELECT ON performance_schema.*）",
+    ),
     ("p_s_memory", "SELECT 1 FROM performance_schema.memory_summary_global_by_event_name LIMIT 1", "内存统计不可读"),
 ]
 
@@ -94,6 +102,8 @@ class Capabilities:
     reasons: dict[str, str] = field(default_factory=dict)
     facts: dict[str, Any] = field(default_factory=dict)
     grants: list[str] = field(default_factory=list)
+    # 账号在 information_schema 里实际能看到的 schema（结构类规则的覆盖范围）
+    schemas: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -132,6 +142,99 @@ def _looks_like_bytes(value: str) -> int | None:
     n = int(m.group(1))
     unit = (m.group(2) or "").upper()
     return n * {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4, "P": 1024**5}[unit]
+
+
+# GRANT <privs> ON <scope> TO <user>，scope 形如 `*.*` / `` `db`.* `` / `` `db`.`tbl` ``
+_RE_GRANT = re.compile(r"^\s*GRANT\s+(?P<privs>.+?)\s+ON\s+(?P<scope>\S+)\s+TO\s", re.I)
+
+
+def _split_privs(text: str) -> set[str]:
+    """'SELECT, INSERT, PROCESS' -> {'SELECT','INSERT','PROCESS'}。
+
+    必须先剥掉列级授权的括号再按逗号切：`SELECT (id, name)` 里的逗号会把
+    'SELECT (id' / 'name)' 切成两个假权限名。列级列表不会嵌套，所以一次
+    非贪婪匹配就够。
+    """
+    text = re.sub(r"\([^()]*\)", "", text)
+    out: set[str] = set()
+    for item in text.split(","):
+        item = item.strip().upper()
+        if item:
+            out.add(item)
+    return out
+
+
+def _parse_grants(lines: list[str]) -> tuple[set[str], dict[str, set[str]]]:
+    """把 SHOW GRANTS 的每行拆成 (全局权限集, {schema: 该库权限集})。
+
+    【坑·已在真实实例上踩到】绝不能对整段授权文本做 `"ALL PRIVILEGES" in text`
+    这类子串判断。一个只被授了 ``GRANT ALL PRIVILEGES ON `biz_db`.*`` 的业务
+    账号，会让 `all_priv` 变真，于是 process / replication / schema_select / super
+    全部被误判为"有"；后果是能力门禁形同虚设，规则一路跑到底才在执行期撞 1142，
+    报告里表现为一堆"执行被拒"的跳过，而不是清晰的"缺少能力位"。必须逐行解析 scope。
+    """
+    global_privs: set[str] = set()
+    schema_privs: dict[str, set[str]] = {}
+    for line in lines:
+        m = _RE_GRANT.match(line)
+        if not m:
+            continue
+        privs = _split_privs(m.group("privs"))
+        scope = m.group("scope").strip().strip("`")
+        if scope == "*.*":
+            global_privs |= privs
+        elif scope.endswith(".*"):
+            schema_privs.setdefault(scope[:-2].strip("`"), set()).update(privs)
+        # `` `db`.`tbl` `` 这种表级授权不构成 schema 级可见性，忽略
+    return global_privs, schema_privs
+
+
+# 各版本表达"能读复制状态"的权限名：5.7/8.0 是 REPLICATION CLIENT，
+# MariaDB 10.5.9+ 拆成了 BINLOG MONITOR + SLAVE MONITOR。
+_REPLICATION_PRIVS = {"REPLICATION CLIENT", "REPLICATION SLAVE", "BINLOG MONITOR", "SLAVE MONITOR"}
+
+
+def _apply_grants(caps: Capabilities) -> None:
+    global_privs, schema_privs = _parse_grants(caps.grants)
+    # `ALL PRIVILEGES ON *.*` 是**一个**权限名，不会展开成 PROCESS/SELECT 之类的
+    # 具体名字，所以要单独识别；漏了它，root 账号会被判成"什么权限都没有"。
+    all_global = "ALL PRIVILEGES" in global_privs
+
+    def has(priv: str) -> bool:
+        return all_global or priv in global_privs
+
+    caps.flags["process"] = has("PROCESS")
+    caps.flags["replication"] = all_global or bool(_REPLICATION_PRIVS & global_privs)
+    caps.flags["super"] = has("SUPER")
+    caps.flags["audit_admin"] = has("AUDIT_ADMIN")
+    caps.flags["global_select"] = has("SELECT")
+
+    readable = sorted(
+        db
+        for db, privs in schema_privs.items()
+        if "SELECT" in privs or "ALL PRIVILEGES" in privs
+    )
+    # 这是**从授权文本推出来**的清单，只作为兜底（probe() 会用
+    # information_schema 问服务器要权威答案）。
+    caps.schemas = readable
+    # 结构类规则读 information_schema，而 I_S 是**按权限过滤**的——只要有任意一个
+    # schema 可读，规则就能对这些库生效（不可见的库 I_S 自己会滤掉，不需要我们排除）。
+    caps.flags["schema_select"] = has("SELECT") or bool(readable)
+
+
+def _note_schema_coverage(caps: Capabilities) -> None:
+    """把"结构类规则实际覆盖哪些库"写成一条 note。
+
+    没有全局 SELECT 时必须显式说明覆盖范围——否则用户会以为"没报无主键表"
+    就是"整个实例都没有无主键表"，而实际上只扫了被授权的几个库。
+    """
+    if caps.flags.get("global_select") or not caps.schemas:
+        return
+    shown = "、".join(caps.schemas[:8]) + ("…" if len(caps.schemas) > 8 else "")
+    caps.notes.append(
+        f"账号只对 {len(caps.schemas)} 个 schema 有 SELECT（{shown}）："
+        "结构类规则的覆盖范围就是这些库，其余库在 information_schema 里不可见、不会被检查"
+    )
 
 
 def probe(conn) -> Capabilities:
@@ -190,20 +293,36 @@ def probe(conn) -> Capabilities:
     try:
         grants = conn.query("SHOW GRANTS FOR CURRENT_USER()")
         caps.grants = [" ".join(str(c) for c in row if c) for row in grants.rows]
-        joined = " | ".join(caps.grants).upper()
-        all_priv = "ALL PRIVILEGES" in joined
-        caps.flags["process"] = all_priv or bool(re.search(r"\bPROCESS\b", joined))
-        caps.flags["replication"] = all_priv or bool(
-            re.search(r"\bREPLICATION (CLIENT|SLAVE)\b", joined)
-        )
-        caps.flags["schema_select"] = all_priv or bool(re.search(r"SELECT[^|]*ON\s+\*\.\*", joined))
-        caps.flags["global_select"] = caps.flags["schema_select"]
-        caps.flags["super"] = all_priv or bool(re.search(r"\bSUPER\b", joined))
-        caps.flags["audit_admin"] = bool(re.search(r"\bAUDIT_ADMIN\b", joined))
+        _apply_grants(caps)
     except QueryError as exc:
         caps.notes.append(f"无法读取授权（{exc}），PROCESS/REPLICATION 能力按未知处理")
         for k in ("process", "replication", "schema_select", "global_select", "super"):
             caps.flags.setdefault(k, False)
+
+    # 2b) 用服务器自己的回答覆盖"从授权文本推出来的"可见库清单。
+    #     information_schema 是按权限过滤的，所以 TABLES 里出现的 schema 就是
+    #     结构类规则**实际覆盖**的范围。这比解析授权文本权威：角色、代理用户、
+    #     以及某些版本里 PROCESS 带来的额外元信息可见性，都能被如实反映。
+    try:
+        r = conn.query(
+            "SELECT DISTINCT TABLE_SCHEMA AS db FROM information_schema.TABLES"
+            " WHERE TABLE_TYPE = 'BASE TABLE'"
+            "   AND TABLE_SCHEMA NOT IN ('mysql', 'information_schema',"
+            "                            'performance_schema', 'sys')"
+            " ORDER BY db"
+        )
+        visible = [row[0] for row in r.rows if row and row[0]]
+        if visible:
+            caps.schemas = visible
+            caps.flags["schema_select"] = True
+        elif not caps.flags.get("global_select"):
+            caps.schemas = []
+            caps.flags["schema_select"] = False
+    except QueryError as exc:
+        # 枚举失败不致命：退回授权文本推出的清单，并把不确定性说出来
+        caps.notes.append(f"无法枚举可见 schema（{exc}），结构类规则的覆盖范围可能不完整")
+
+    _note_schema_coverage(caps)
 
     # 3) 事实变量
     facts: dict[str, Any] = {}
