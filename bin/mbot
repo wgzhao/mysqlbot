@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# mysqlbot 启动器：把仓库根加进 PYTHONPATH，再调用 mbot 包。
+# 可用 MYSQLBOT_PYTHON 指定解释器；否则依次尝试 python3 / 托管解释器。
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(dirname "$HERE")"
+export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
+
+if [ -n "${MYSQLBOT_PYTHON:-}" ]; then
+  PY="$MYSQLBOT_PYTHON"
+else
+  PY=""
+  for candidate in python3 "$HOME/.workbuddy/binaries/python/envs/default/bin/python" /opt/homebrew/bin/python3 /usr/bin/python3; do
+    if command -v "$candidate" >/dev/null 2>&1; then PY="$candidate"; break; fi
+  done
+  if [ -z "$PY" ]; then
+    echo "找不到 python3；请设置 MYSQLBOT_PYTHON" >&2
+    exit 2
+  fi
+fi
+
+exec "$PY" -m mbot "$@"

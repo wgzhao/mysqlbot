@@ -1,0 +1,35 @@
+# 尽力而为的期望命中（软断言）：没命中只告警，不算失败。
+# 这些规则的触发依赖累计计数器的量级、版本内部行为或时序，在一次性实例上不稳定。
+# `#` 或 `--` 开头为注释。
+
+# 累计耗时榜：需要风暴的累计执行时间跨过 10 秒，机器快慢影响很大
+statement_high_total_latency
+
+# 内部临时表落盘：8.0.28+ 默认 TempTable 引擎改变了落盘计数口径
+tmp_table_disk_spill
+
+# 排序多路归并：Sort_merge_passes 的计数取决于排序实现细节
+sort_merge_passes
+
+# 缓冲池命中率：需要"工作集远大于缓冲池"且已产生足够逻辑读
+buffer_pool_hit_low
+
+# 以下规则在一次性实例上**无法**确定性复现，故不列入断言，仅在此备案：
+#
+#   unused_index              需要运行 >= 3 天，否则性能模式里的索引统计无意义
+#   oversized_table           需要单表 >= 10GB
+#   buffer_pool_undersized    需要 InnoDB 数据总量 >= 1GB
+#   undo_history_list_long    需要 history list 长度 >= 10 万
+#   long_running_transaction  需要事务存活 >= 300 秒（会让自测跑到 5 分钟以上）
+#   innodb_row_lock_contention需要累计行锁等待 > 100 次
+#   innodb_log_waits          需要 redo 空间真实耗尽
+#   binlog_cache_disk_spill   需要 binlog cache 真实溢出
+#   table_open_cache_miss / thread_cache_miss / open_tables_pressure
+#                             需要累计计数器达到量级门禁
+#   connection_saturation     需要连接数达到 max_connections 的 85%
+#   connection_headroom_low   同上，且 Max_used_connections 是历史峰值
+#   innodb_redo_undersized    需要缓冲池远大于 redo 容量
+#   replication_*             需要真实从库
+#   replica_writable          需要真实从库
+#   log_bin_off               需要重启实例关闭 binlog（会与 binlog 类规则冲突）
+#   binlog_retention_unbounded_57  仅 5.7/5.6 适用，8.0+ 由版本门禁跳过

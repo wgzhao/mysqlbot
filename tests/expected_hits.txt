@@ -1,0 +1,27 @@
+# 自测必须命中的规则（硬断言）。每行一个 id，`#` 或 `--` 开头为注释。
+# 选取标准：可以在一次性实例上**确定性**地种下违规。
+
+# --- 结构类（来自 10_schema.sql + 20_load.sql）---
+non_innodb_table
+table_without_primary_key
+redundant_index
+auto_increment_exhaustion
+stale_index_statistics
+
+# --- 配置类（来自 30_settings.sql）---
+trx_commit_not_durable
+sync_binlog_not_1
+slow_query_log_off
+long_query_time_high
+sql_require_primary_key_off
+stats_expiry_too_long
+innodb_file_per_table_off
+binlog_retention_unbounded
+
+# --- 工作负载类（来自 40_storm.sh）---
+full_table_scan_heavy
+
+# --- 锁类（来自 50_locks.sh）---
+blocking_chains
+metadata_lock_wait
+idle_in_transaction
