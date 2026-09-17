@@ -11,7 +11,7 @@ if [ -n "${MYSQLBOT_PYTHON:-}" ]; then
   PY="$MYSQLBOT_PYTHON"
 else
   PY=""
-  for candidate in python3 "$HOME/.workbuddy/binaries/python/envs/default/bin/python" /opt/homebrew/bin/python3 /usr/bin/python3; do
+  for candidate in python3 /opt/homebrew/bin/python3 /usr/bin/python3; do
     if command -v "$candidate" >/dev/null 2>&1; then PY="$candidate"; break; fi
   done
   if [ -z "$PY" ]; then

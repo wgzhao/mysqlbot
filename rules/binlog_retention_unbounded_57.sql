@@ -1,4 +1,5 @@
 -- @id: binlog_retention_unbounded_57
+-- @variant_of: binlog_retention_unbounded
 -- @title: binlog 永不自动清理（5.7 口径：expire_logs_days=0）
 -- @severity: warn
 -- @dimension: capacity

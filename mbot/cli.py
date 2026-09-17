@@ -1,15 +1,17 @@
 """命令行入口。
 
-    mbot check   跑一轮只读巡检
-    mbot probe   只探能力位
-    mbot list    列出规则库
-    mbot lint    校验规则文件契约
-    mbot doctor  自检（找客户端、找规则目录、做一次连通性测试）
+    mbot check     跑一轮只读巡检
+    mbot probe     只探能力位
+    mbot list      列出规则库
+    mbot lint      校验规则文件契约 + 声明与正文的版本一致性
+    mbot doctor    自检（找客户端、找规则目录、做一次连通性测试）
+    mbot coverage  离线推演规则库在某个 MySQL 版本上的可用性（不连库）
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from datetime import datetime, timezone
@@ -80,7 +82,14 @@ def _build_parser() -> argparse.ArgumentParser:
     c.add_argument("--label", default="", help="报告里显示的实例标签")
 
     p.add_argument("command", nargs="?", default="check",
-                   choices=["check", "probe", "list", "lint", "doctor", "docs"])
+                   choices=["check", "probe", "list", "lint", "doctor", "docs", "coverage"])
+
+    # coverage 专用：这一组不连库，纯静态推演
+    v = p.add_argument_group("版本推演（仅 coverage）")
+    v.add_argument("--mysql-version", "--at", dest="mysql_version", default="",
+                   help="目标 MySQL 版本，如 9.7 / 8.0.43。回答「这一版上哪些规则会跑」")
+    v.add_argument("--matrix", action="store_true",
+                   help="按版本网格输出矩阵（默认 5.7/8.0/8.4/9.0/9.7）")
     return p
 
 
@@ -168,11 +177,170 @@ def cmd_list(a) -> int:
     return EXIT_CONTRACT if errors else EXIT_OK
 
 
+def cmd_coverage(a) -> int:
+    """离线推演规则库在某个 MySQL 版本上的可用性。**不连库。**
+
+    存在的理由是版本漂移的成本不对称：
+      - 「连库跑一遍」能回答"现在这台机器上哪些规则报错"，但每加一个目标版本
+        就要再找一台实例；
+      - 「静态推演」能回答"9.7 上哪些规则会跑"，代价是维护 mbot/signals.py
+        那张信号表——而那张表把版本敏感面收敛到了 40 行常量。
+    """
+    from . import signals as sg
+
+    rules, errors = _load(a)
+    if errors:
+        for e in errors:
+            print(f"规则问题: {e}", file=sys.stderr)
+    if not rules:
+        print(f"规则目录 {a.rules_dir} 下没有可用规则", file=sys.stderr)
+        return EXIT_FAILURE
+
+    opt = RunOptions(only=a.only or None, skip=a.skip or None,
+                     dimensions=a.dimension or None, scopes=a.scope or None,
+                     tags=a.tag or None)
+    selected = select_rules(rules, opt)
+
+    if a.matrix:
+        return _coverage_matrix(a, selected, sg)
+    if not a.mysql_version:
+        print("coverage 需要 --mysql-version（例如 --at 9.7），或加 --matrix 看版本网格",
+              file=sys.stderr)
+        return EXIT_FAILURE
+    return _coverage_one(a, selected, sg, a.mysql_version)
+
+
+def _coverage_one(a, rules, sg, version: str) -> int:
+    verdicts, tally = sg.coverage(rules, version)
+
+    if a.output == "json":
+        payload = {
+            "schema": "mysqlbot/coverage/v1",
+            "mysql_version": version,
+            "supported_from": sg.SUPPORTED_FROM,
+            "connected": False,
+            "tally": tally,
+            "rules": [
+                {
+                    "id": v.rule.id,
+                    "status": v.status,
+                    "reason": v.reason,
+                    "offending": v.offending,
+                    "since": v.rule.since or "",
+                    "removed_in": v.rule.removed_in or "",
+                    "variant_of": v.rule.variant_of or "",
+                    "requires": v.rule.requires,
+                }
+                for v in verdicts
+            ],
+        }
+        text = json.dumps(payload, ensure_ascii=False, indent=2)
+    else:
+        out: list[str] = []
+        out.append(f"目标版本 MySQL {version}  —— 纯静态推演，未连接实例")
+        out.append(f"支持下界 {sg.SUPPORTED_FROM} · 参与推演 {len(rules)} 条规则")
+        out.append("")
+        out.append(f"  预计运行      {tally.get(sg.RUNNABLE, 0):>3}")
+        out.append(f"  版本门禁跳过  {tally.get(sg.GATED, 0):>3}   （区间不符，设计如此）")
+        out.append(f"  版本风险      {tally.get(sg.AT_RISK, 0):>3}   （硬引用的信号在这一版不存在，执行会失败）")
+
+        gated = [v for v in verdicts if v.status == sg.GATED]
+        risky = [v for v in verdicts if v.status == sg.AT_RISK]
+        if gated:
+            out.append("")
+            out.append("门禁跳过：")
+            for v in gated:
+                out.append(f"  {v.rule.id:34} {v.reason}")
+        if risky:
+            out.append("")
+            out.append("⚠ 版本风险（这些是缺陷，不是环境限制）：")
+            for v in risky:
+                out.append(f"  {v.rule.id:34} {v.reason}")
+
+        variants = sorted({v.rule.variant_of for v in verdicts if v.rule.variant_of})
+        if variants:
+            out.append("")
+            out.append("版本变体分组：" + "、".join(variants))
+            for base in variants:
+                members = [(v.rule.id, v.rule.since or sg.SUPPORTED_FROM, v.rule.removed_in or "∞")
+                           for v in verdicts if sg.variant_base(v.rule) == base]
+                out.append("  " + base + ": " + "  |  ".join(f"{i} [{s}~{e})" for i, s, e in members))
+
+        out.append("")
+        out.append("注：版本兼容只回答「能不能执行」，不回答「能不能看到」。")
+        out.append("    账号权限造成的跳过必须连库跑 probe 才知道——见 docs/compat-matrix.md。")
+        text = "\n".join(out)
+
+    if a.out_file:
+        Path(a.out_file).write_text(text + "\n", encoding="utf-8")
+        print(f"已写入 {a.out_file}")
+    else:
+        print(text)
+    return EXIT_FINDINGS if tally.get(sg.AT_RISK, 0) else EXIT_OK
+
+
+def _coverage_matrix(a, rules, sg) -> int:
+    versions = list(sg.DEFAULT_GRID)
+    grid = {ver: {v.rule.id: v for v in sg.coverage(rules, ver)[0]} for ver in versions}
+    mark = {sg.RUNNABLE: "●", sg.GATED: "○", sg.AT_RISK: "✗"}
+
+    def cell(rid: str, ver: str) -> str:
+        v = grid[ver].get(rid)
+        return mark.get(v.status, "?") if v else "?"
+
+    if a.output == "json":
+        payload = {
+            "schema": "mysqlbot/coverage-matrix/v1",
+            "versions": versions,
+            "supported_from": sg.SUPPORTED_FROM,
+            "connected": False,
+            "rules": [
+                {
+                    "id": r.id,
+                    "variant_of": r.variant_of or "",
+                    "since": r.since or "",
+                    "removed_in": r.removed_in or "",
+                    "status_by_version": {ver: grid[ver][r.id].status for ver in versions},
+                }
+                for r in rules
+            ],
+        }
+        text = json.dumps(payload, ensure_ascii=False, indent=2)
+    else:
+        w = max([len(r.id) for r in rules] + [6])
+        head = "规则".ljust(w + 2) + "".join(v.center(6) for v in versions)
+        out = [head, "-" * len(head)]
+        for r in rules:
+            out.append(r.id.ljust(w + 2) + "".join(cell(r.id, v).center(6) for v in versions))
+        out.append("")
+        out.append("  ● 预计运行    ○ 版本门禁跳过    ✗ 版本风险（会执行失败）")
+        out.append(f"  版本网格：{'  '.join(versions)}（8.0 已 EOL；8.4 与 9.7 是当前两个 LTS）")
+        totals = {v: {"●": 0, "○": 0, "✗": 0} for v in versions}
+        for r in rules:
+            for v in versions:
+                c = cell(r.id, v)
+                if c in totals[v]:
+                    totals[v][c] += 1
+        out.append("")
+        out.append("  合计 " + "   ".join(
+            f"{v}: ●{totals[v]['●']} ○{totals[v]['○']} ✗{totals[v]['✗']}" for v in versions))
+        text = "\n".join(out)
+
+    if a.out_file:
+        Path(a.out_file).write_text(text + "\n", encoding="utf-8")
+        print(f"已写入 {a.out_file}")
+    else:
+        print(text)
+    risks = sum(1 for r in rules for v in versions if cell(r.id, v) == "✗")
+    return EXIT_FINDINGS if risks else EXIT_OK
+
+
 def cmd_lint(a) -> int:
     from .rule import DIMENSIONS, EXACTNESS, SCOPES
 
     rules, errors = _load(a)
     problems = list(errors)
+    notes: list[str] = []
     seen_ids: dict[str, str] = {}
     for r in rules:
         if r.id in seen_ids:
@@ -338,6 +506,21 @@ def cmd_doctor(a) -> int:
             shown = "、".join(caps.schemas[:8]) + ("…" if len(caps.schemas) > 8 else "")
             print(f"可见 schema  : {len(caps.schemas)} 个（{shown}）")
         print(f"会话前导     : {default_init_sql(caps) or '（无）'}")
+        # 变量信号登记表 vs 实例实测：软查表缺变量是**哑的**（变量不存在 →
+        # MAX(CASE...) 返回 NULL → 规则既不报错也不跳过），只能靠这一步显式核对。
+        # 不一致意味着 mbot 自己带的那份版本知识过期了，推演结论不再可信。
+        if caps.signal_skip:
+            print(f"信号登记表   : 未核对 —— {caps.signal_skip}")
+        elif caps.signal_mismatch:
+            print(f"信号登记表   : ✗ {len(caps.signal_mismatch)} 条与实例不一致 —— mbot/signals.py 已过期")
+            for m in caps.signal_mismatch:
+                print(f"               {m}")
+            ok = False
+        else:
+            print(
+                f"信号登记表   : ✓ {caps.signal_registered} 个变量信号，"
+                f"实例存在 {caps.signal_present} 个，与登记区间吻合"
+            )
     except QueryError as exc:
         print(f"连通性       : 失败 —— {exc}")
         ok = False
@@ -420,6 +603,7 @@ def main(argv: list[str] | None = None) -> int:
         "lint": cmd_lint,
         "doctor": cmd_doctor,
         "docs": cmd_docs,
+        "coverage": cmd_coverage,
     }[args.command]
     try:
         return handler(args)

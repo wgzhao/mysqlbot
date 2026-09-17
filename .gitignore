@@ -11,6 +11,9 @@ report.md
 /tmp-report*
 .mysqlbot-cache/
 
+# 项目记忆（含真实实例信息，不随仓库发布）
+.workbuddy/
+
 # 编辑器
 .idea/
 .vscode/

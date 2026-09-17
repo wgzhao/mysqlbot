@@ -38,9 +38,9 @@
 | warn | [`idle_in_transaction`](#idle_in_transaction) | risk | workload | `trx` | catalog | 5.7 | process |
 | warn | [`log_bin_off`](#log_bin_off) | risk | instance | `setting:log_bin` | exact | 5.7 | - |
 | warn | [`long_running_transaction`](#long_running_transaction) | risk | workload | `trx` | catalog | 5.7 | process |
-| warn | [`metadata_lock_wait`](#metadata_lock_wait) | risk | workload | `table` | catalog | 5.7 | p_s_mdl, process |
+| warn | [`metadata_lock_wait`](#metadata_lock_wait) | risk | workload | `table` | catalog | 5.7.3 | p_s_mdl, process |
 | warn | [`non_innodb_table`](#non_innodb_table) | risk | schema | `table` | catalog | 5.7 | schema_select |
-| warn | [`replica_writable`](#replica_writable) | risk | cluster | `replication` | catalog | 5.7 | p_s, replication |
+| warn | [`replica_writable`](#replica_writable) | risk | cluster | `replication` | catalog | 5.7.8 | p_s, replication |
 | warn | [`sync_binlog_not_1`](#sync_binlog_not_1) | risk | instance | `setting:sync_binlog` | exact | 5.7 | - |
 | warn | [`table_without_primary_key`](#table_without_primary_key) | risk | schema | `table` | catalog | 5.7 | schema_select |
 | warn | [`trx_commit_not_durable`](#trx_commit_not_durable) | risk | instance | `setting:innodb_flush_log_at_trx_commit` | exact | 5.7 | - |
@@ -892,7 +892,7 @@ ORDER BY t.age_s DESC
 **存在元数据锁（MDL）等待**
 
 - 严重度 `warn` · 维度 `risk` · 作用域 `workload` · 对象 `table`
-- 精确度 `catalog` · 起始版本 `5.7`
+- 精确度 `catalog` · 起始版本 `5.7.3`
 - 依赖能力位：`p_s_mdl`, `process`
 - 参考：-
 
@@ -985,14 +985,14 @@ ORDER BY t.bytes DESC
 **从库可写（read_only 关闭）**
 
 - 严重度 `warn` · 维度 `risk` · 作用域 `cluster` · 对象 `replication`
-- 精确度 `catalog` · 起始版本 `5.7`
+- 精确度 `catalog` · 起始版本 `5.7.8`
 - 依赖能力位：`p_s`, `replication`
 - 参考：-
 - 标签：replication, safety
 
 **处置**：存在复制通道且 read_only=OFF，意味着业务代码可以把写请求打到从库上，产生主从不一致，且这些写入会与 SQL 线程的写入冲突。正确做法是开启 read_only=ON 或 super_read_only=ON（后者连 SUPER 账号也拦住，能防住"用管理员账号误写"）。
 
-**注意（误报条件与局限）**：该规则只在"已经存在复制通道"时才触发，因此不适用于承担写流量的主库。有些架构刻意让从库可写（例如多主、双写、或把从库当只读业务库但接受不一致），这类情况下应把本规则加入 skip 列表而不是调参。读取 P_S 复制表需要 REPLICATION CLIENT 权限，缺权限时本规则会被跳过而不是误报干净。
+**注意（误报条件与局限）**：该规则只在"已经存在复制通道"时才触发，因此不适用于承担写流量的主库。有些架构刻意让从库可写（例如多主、双写、或把从库当只读业务库但接受不一致），这类情况下应把本规则加入 skip 列表而不是调参。读取 P_S 复制表需要 REPLICATION CLIENT 权限，缺权限时本规则会被跳过而不是误报干净。下界写作 5.7.8 而非 5.7：本规则读了 super_read_only，该变量是 5.7.8 才引入的，在 5.7.0~5.7.7 上会报 1193。如果你的实例早于 5.7.8（实际不会有），把 @requires 里的判断降级为只读 read_only 即可。
 
 <details><summary>SQL</summary>
 

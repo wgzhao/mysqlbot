@@ -8,6 +8,8 @@
 ALL PRIVILEGES，于是 process / replication / schema_select / super 全为真，
 规则一路跑到底才在执行期撞 1142，报告里变成一堆"执行被拒"的跳过。
 
+> 注意：下面所有库名/账号名都是**脱敏后的中性占位名**，不是真实对象。
+
 用法：python3 tests/test_grants.py
 """
 
@@ -53,8 +55,9 @@ def caps_from(grants: list[str]) -> Capabilities:
 
 # ---------------------------------------------------------------- 用例
 
-# 真实抓取：<实例 B> 的 biz_user@%（业务账号，只有 PROCESS 是全局的）
-OPERATOR_GRANTS = [
+# 真实抓取（已脱敏）：生产实例上的业务账号，全局只有 CREATE + PROCESS，
+# 其余是若干业务库的 ALL / SELECT。库名与账号名均已替换为中性占位名。
+BIZ_GRANTS = [
     "GRANT CREATE, PROCESS ON *.* TO `biz_user`@`%`",
     "GRANT ALL PRIVILEGES ON `biz_db`.* TO `biz_user`@`%`",
     "GRANT ALL PRIVILEGES ON `scrm_db`.* TO `biz_user`@`%`",
@@ -63,15 +66,15 @@ OPERATOR_GRANTS = [
 ]
 
 
-def test_biz_user_account() -> None:
+def test_business_account() -> None:
     print("【业务账号】CREATE, PROCESS ON *.* + 若干库的 ALL/ SELECT")
-    c = caps_from(OPERATOR_GRANTS)
+    c = caps_from(BIZ_GRANTS)
     check("process", c.flags["process"], True)
     check("replication 未授权", c.flags["replication"], False)
     check("super 未授权", c.flags["super"], False)
     check("global_select 未授权", c.flags["global_select"], False)
     check("schema_select 为真（有库可读）", c.flags["schema_select"], True)
-    check("visible_schemas", c.schemas, ["biz_db", "scrm_db", "report_db", "chat_db"])
+    check("visible_schemas", c.schemas, ["biz_db", "chat_db", "report_db", "scrm_db"])
     check("给出覆盖范围说明", bool([n for n in c.notes if "只对 4 个 schema" in n]), True)
 
 
@@ -139,7 +142,7 @@ def test_privilege_suffix_and_case() -> None:
 
 
 def main() -> int:
-    test_biz_user_account()
+    test_business_account()
     test_global_all_privileges()
     test_minimal_readonly()
     test_usage_only()

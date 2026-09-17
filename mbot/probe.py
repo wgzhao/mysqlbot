@@ -104,6 +104,11 @@ class Capabilities:
     grants: list[str] = field(default_factory=list)
     # 账号在 information_schema 里实际能看到的 schema（结构类规则的覆盖范围）
     schemas: list[str] = field(default_factory=list)
+    # signals.py 的**变量**信号登记表 vs 实例实测存在性（见 attest_variable_signals）
+    signal_registered: int = 0
+    signal_present: int = 0
+    signal_mismatch: list[str] = field(default_factory=list)
+    signal_skip: str = ""
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -237,6 +242,59 @@ def _note_schema_coverage(caps: Capabilities) -> None:
     )
 
 
+def attest_variable_signals(conn, version: tuple[int, ...]) -> tuple[int, int, list[str], str]:
+    """把 ``signals.py`` 登记的**变量**信号，与实例上真实存在的变量对一遍。
+
+    返回 ``(登记数, 实例存在数, 不一致说明, 跳过原因)``。
+
+    ## 为什么只对变量做这件事
+
+    变量是唯一存在「**软查表**」用法的信号源：
+
+    .. code-block:: sql
+
+        -- 硬引用：变量不存在 → ERROR 1193，整条规则崩，error 计数会抓到
+        SELECT @@innodb_redo_log_capacity
+
+        -- 软查表：变量不存在 → 那行不存在 → MAX() 返回 NULL，规则自己兜住
+        SELECT MAX(CASE WHEN VARIABLE_NAME = 'innodb_redo_log_capacity'
+                        THEN VARIABLE_VALUE END)
+
+    硬引用失败是**响的**，live_compat 的推演对账能看见；软查表失败是**哑的** ——
+    规则不报错、不跳过，可能静静地给出错误结论（正是铁律 3 要防的那一类）。
+    表名与列名则一律是硬引用（缺了报 1146 / 1054），由 error 计数兜住，
+    所以不需要在这一步里重复核对。
+
+    这个方法的价值在于：登记表是人写的、会过期，而它唯一的权威来源就是
+    「真实实例上到底有没有这个变量」。跑一次就相当于让实例替我们复查登记表。
+    """
+    from . import signals as sg
+
+    sigs = [s for s in sg._ORDER if s.kind == "variable"]
+    if not sigs:
+        return 0, 0, [], ""
+    names = sorted({s.name for s in sigs})
+    try:
+        r = conn.query(
+            "SELECT VARIABLE_NAME FROM performance_schema.global_variables"
+            f" WHERE VARIABLE_NAME IN ({','.join(repr(n) for n in names)})"
+        )
+    except QueryError as exc:
+        return len(names), 0, [], f"读不到 performance_schema.global_variables（{exc}）"
+    present = {row[0] for row in r.rows if row and row[0]}
+
+    bad: list[str] = []
+    for s in sorted(sigs, key=lambda x: x.name):
+        want, got = s.available_in(version), s.name in present
+        if want == got:
+            continue
+        if got:
+            bad.append(f"{s.name}：登记为 {s.range_text()}（区间外），实例上却仍存在")
+        else:
+            bad.append(f"{s.name}：登记为 {s.range_text()}（区间内），实例上却不存在")
+    return len(names), len(present), bad, ""
+
+
 def probe(conn) -> Capabilities:
     """对已连接的实例做一次能力探测。任何单项失败都只记原因，不中断。"""
     srv = getattr(conn, "server", {}) or {}
@@ -367,6 +425,24 @@ def probe(conn) -> Capabilities:
         facts["uptime_s"] = int(_numeric(facts["Uptime"]) or 0)
 
     caps.facts = facts
+
+    # 3b) 变量信号登记表 vs 实例实测 —— 见 attest_variable_signals 的 docstring。
+    #     MariaDB 的变量集与 MySQL 不同，登记表未覆盖它，硬核对只会全是假阳性。
+    from . import signals as sg
+
+    if caps.is_mariadb:
+        caps.signal_skip = "MariaDB 的变量集与 MySQL 不同，登记表不适用于它"
+    elif caps.version and caps.version < parse_version(sg.SUPPORTED_FROM):
+        caps.signal_skip = f"版本 {caps.version_str} 早于支持下界 {sg.SUPPORTED_FROM}"
+    else:
+        n_reg, n_pres, bad_sig, sig_skip = attest_variable_signals(conn, caps.version)
+        caps.signal_registered, caps.signal_present = n_reg, n_pres
+        caps.signal_mismatch, caps.signal_skip = bad_sig, sig_skip
+        if bad_sig:
+            caps.notes.append(
+                f"信号登记表与实例不一致（{len(bad_sig)} 条）：{'；'.join(bad_sig)}"
+                " —— mbot/signals.py 已过期，版本推演结果不可信（见 docs/versioning.md）"
+            )
 
     # 4) 版本相关的能力修正
     if caps.is_mariadb:

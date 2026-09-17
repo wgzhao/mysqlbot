@@ -43,6 +43,7 @@ _KEY_MAP = {
     "exactness": "exactness",
     "since": "since",
     "removed_in": "removed_in",
+    "variant_of": "variant_of",
     "remediation": "remediation",
     "caveats": "caveats",
     "ref": "ref",
@@ -86,6 +87,10 @@ class Rule:
     exactness: str = "catalog"
     since: str = ""
     removed_in: str = ""
+    # 同一条逻辑规则的版本变体，指向基础规则的 @id。
+    # 显式声明（而非靠 `_57` 后缀推断）是为了让 lint 能断言
+    # "变体集合无缝覆盖声明区间" —— 见 signals.variant_gaps()。
+    variant_of: str = ""
     remediation: str = ""
     caveats: str = ""
     ref: str = "-"

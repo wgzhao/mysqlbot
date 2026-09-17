@@ -1,4 +1,5 @@
 -- @id: blocking_chains_57
+-- @variant_of: blocking_chains
 -- @title: 存在行锁等待链（5.7 路径）
 -- @severity: warn
 -- @dimension: risk

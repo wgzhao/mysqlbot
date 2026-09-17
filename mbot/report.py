@@ -31,6 +31,9 @@ class Outcome:
     columns: list[str] = field(default_factory=list)
     rows: list[dict] = field(default_factory=list)
     elapsed_ms: float = 0.0
+    # 为什么没跑（仅 skipped 时非空）。取值见 runner.SKIP_* 常量。
+    # 有它才能让下游**断言**"跳过是版本原因还是权限原因"，而不是去猜中文。
+    skip_kind: str = ""
     # 规则 SQL 最外层的 LIMIT。命中行数正好等于它时，说明结果**可能被截断**：
     # 报告里的"N 行"其实是"至少 N 行"。不标出来就会把 50 条读成"一共 50 条"。
     row_limit: int | None = None
@@ -99,6 +102,8 @@ def build_payload(caps, outcomes: list[Outcome], meta: dict) -> dict:
         }
         if o.reason:
             entry["reason"] = o.reason
+        if o.skip_kind:
+            entry["skip_kind"] = o.skip_kind
         if o.status == HIT:
             entry["remediation"] = o.rule.remediation
             entry["caveats"] = o.rule.caveats

@@ -103,8 +103,20 @@ def select_rules(rules: list[Rule], opt: RunOptions) -> list[Rule]:
     return out
 
 
-def gate(rule: Rule, caps: Capabilities, ignore_min_uptime: bool = False) -> str | None:
-    """返回 None 表示可以通过；否则返回跳过原因。
+# 「这条规则为什么没跑」的类型。写进报告的 skip_kind 字段。
+# 存在的理由：原先只有一句中文 reason，下游要判断"这个跳过是版本原因还是权限原因"
+# 只能做字符串匹配——而"执行被拒（Table 'x' doesn't exist）"这种运行时缺对象
+# 会被错判成权限问题，于是版本漂移又藏起来了。结论要么结构化，要么不可信。
+SKIP_VERSION = "version"  # @since / @removed_in 门禁
+SKIP_UPTIME = "uptime"  # 运行时长不足
+SKIP_CAPABILITY = "capability"  # 缺能力位（账号权限）
+SKIP_PERMISSION = "permission"  # 运行时被拒（1142 等）
+SKIP_MISSING_OBJECT = "missing_object"  # 运行时对象不存在（表/视图）
+SKIP_OTHER = "other"
+
+
+def gate(rule: Rule, caps: Capabilities, ignore_min_uptime: bool = False) -> tuple[str, str] | None:
+    """返回 None 表示可以通过；否则返回 ``(类型, 跳过原因)``。
 
     运行时长门禁放在这里而不是写进 SQL：累计型计数器（命中率、未使用索引、
     tmp 表比例）在实例刚重启时数值毫无意义，但"因此不报"必须是**显式的跳过**，
@@ -112,22 +124,22 @@ def gate(rule: Rule, caps: Capabilities, ignore_min_uptime: bool = False) -> str
     """
     if not rule.supports_version(caps.version):
         if rule.since_tuple and not version_ge(caps.version, rule.since_tuple):
-            return f"需要 MySQL >= {rule.since}"
+            return SKIP_VERSION, f"需要 MySQL >= {rule.since}"
         if rule.removed_tuple:
-            return f"MySQL >= {rule.removed_in} 已移除该信号源"
+            return SKIP_VERSION, f"MySQL >= {rule.removed_in} 已移除该信号源"
     if rule.min_uptime and not ignore_min_uptime:
         uptime = caps.fact("uptime_s")
         if uptime is None:
-            return f"无法读取实例运行时长，而本规则需要运行满 {fmt_duration(rule.min_uptime)} 才能判定"
+            return SKIP_UPTIME, f"无法读取实例运行时长，而本规则需要运行满 {fmt_duration(rule.min_uptime)} 才能判定"
         if uptime < rule.min_uptime:
-            return (
+            return SKIP_UPTIME, (
                 f"实例运行时间不足：累计计数器需要 {fmt_duration(rule.min_uptime)}，"
                 f"当前仅 {fmt_duration(uptime)}（重启后计数器清零，此刻结论不可信）"
             )
     missing = caps.missing(rule.requires)
     if missing:
         detail = "；".join(caps.reasons.get(m, "") for m in missing if caps.reasons.get(m))
-        return f"缺少能力位 {', '.join(missing)}" + (f"（{detail}）" if detail else "")
+        return SKIP_CAPABILITY, f"缺少能力位 {', '.join(missing)}" + (f"（{detail}）" if detail else "")
     return None
 
 
@@ -173,7 +185,14 @@ def run_rule(rule: Rule, conn, caps: Capabilities, opt: RunOptions, preamble: li
     except QueryError as exc:
         elapsed = (time.perf_counter() - started) * 1000
         if exc.degradable:
-            return Outcome(rule, SKIPPED, rule.severity, f"执行被拒（{exc}）", elapsed_ms=elapsed)
+            # 运行时被降级：区分"权限不够"和"对象不存在"。
+            # 后者若是版本造成的（例如引用了 9.0 才加的表），说明规则的
+            # 版本声明过宽——推演对账会靠这个字段把它抓出来。
+            kind = SKIP_PERMISSION if exc.kind == "permission" else SKIP_MISSING_OBJECT
+            return Outcome(
+                rule, SKIPPED, rule.severity, f"执行被拒（{exc}）",
+                elapsed_ms=elapsed, skip_kind=kind,
+            )
         if exc.kind == "version_mismatch":
             return Outcome(
                 rule,
@@ -226,7 +245,8 @@ def run_all(rules: list[Rule], conn, caps: Capabilities, opt: RunOptions) -> lis
     for rule in rules:
         reason = gate(rule, caps, opt.ignore_min_uptime)
         if reason:
-            outcomes.append(Outcome(rule, SKIPPED, rule.severity, reason))
+            kind, text = reason
+            outcomes.append(Outcome(rule, SKIPPED, rule.severity, text, skip_kind=kind))
             continue
         outcomes.append(run_rule(rule, conn, caps, opt, preamble))
     return outcomes
