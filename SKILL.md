@@ -274,6 +274,7 @@ mysqlbot/
 ├── SKILL.md                本文件
 ├── README.md               仓库说明（**英文**，面向公开仓库；结构对齐 pgbot）
 ├── README_CN.md            同上中文版（两份内容一一对应，改一份要同步另一份）
+├── LICENSE                 MIT 许可证
 ├── bin/mbot                启动器
 ├── mbot/                   实现（rule 解析 / signals / conn / probe / runner / report / cli）
 ├── rules/*.sql             42 条规则（核心资产）

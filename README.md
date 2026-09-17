@@ -13,6 +13,7 @@
   <img alt="Python 3.9+" src="https://img.shields.io/badge/python-3.9%2B-3776AB">
   <img alt="No dependencies" src="https://img.shields.io/badge/dependencies-none-brightgreen">
   <img alt="No writes" src="https://img.shields.io/badge/writes-none-blue">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
 </p>
 
 <p align="center">
@@ -693,6 +694,7 @@ rules/            42 rules, one .sql file each
 sql/              the read-only account script (two tiers)
 tests/            unit tests, end-to-end regression, cross-version compatibility
 docs/             design record, versioning, compatibility matrix, generated catalogue
+LICENSE           MIT license
 ```
 
 ## Further reading
@@ -711,5 +713,4 @@ worth reading in the original if you can:
 
 ## License
 
-No license file has been added yet, which by default means all rights reserved. If you
-want to reuse or redistribute this, open an issue and we'll settle on a license.
+[MIT](LICENSE).

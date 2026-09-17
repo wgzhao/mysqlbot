@@ -12,6 +12,7 @@
   <img alt="Python 3.9+" src="https://img.shields.io/badge/python-3.9%2B-3776AB">
   <img alt="零依赖" src="https://img.shields.io/badge/dependencies-none-brightgreen">
   <img alt="不写库" src="https://img.shields.io/badge/writes-none-blue">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
 </p>
 
 <p align="center">
@@ -627,6 +628,7 @@ rules/            42 条规则，每条一个 .sql 文件
 sql/              只读账号脚本（两档授权）
 tests/            单测、端到端回归、跨版本兼容性
 docs/             设计记录、版本兼容架构、验证矩阵、生成的规则目录
+LICENSE           MIT 许可证
 ```
 
 ## 延伸阅读
@@ -642,4 +644,4 @@ docs/             设计记录、版本兼容架构、验证矩阵、生成的�
 
 ## 许可证
 
-尚未添加许可证文件，按默认即"保留所有权利"。如果你需要复用或分发，请开 issue 一起定一个。
+[MIT](LICENSE)。
