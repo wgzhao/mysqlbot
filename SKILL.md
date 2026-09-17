@@ -25,13 +25,13 @@ agent_created: true
 cd ~/code/personal/mysqlbot
 
 # 0. 自检：确认客户端、规则目录、连通性、能力位，并把信号登记表与实例核对一遍
-./bin/mbot doctor --host <host> --port 3306 -u mbot_reader -p
+./bin/mbot doctor --host <host> --port 3306 -u mbot_reader -p "$MYSQLBOT_PASSWORD"
 
 # 1. 体检（默认输出人读表格）
-./bin/mbot check --host <host> -u mbot_reader -p
+./bin/mbot check --host <host> -u mbot_reader -p "$MYSQLBOT_PASSWORD"
 
 # 2. 机器可消费的完整契约（含能力位、跳过原因与类型、每条命中的原始行）
-./bin/mbot check --host <host> -u mbot_reader -p -o json --out-file report.json
+./bin/mbot check --host <host> -u mbot_reader -p "$MYSQLBOT_PASSWORD" -o json --out-file report.json
 
 # 3. 生成可贴进工单/文档的 markdown，或给 CI 用的 SARIF
 ./bin/mbot check ... -o markdown --out-file report.md
@@ -44,7 +44,7 @@ cd ~/code/personal/mysqlbot
 ./bin/mbot check ... --min-severity warn       # 只报 warn 以上
 
 # 5. 只看能力位（判断账号给够了没有）
-./bin/mbot probe --host <host> -u mbot_reader -p
+./bin/mbot probe --host <host> -u mbot_reader -p "$MYSQLBOT_PASSWORD"
 
 # 6. 列出/校验/生成规则文档
 ./bin/mbot list
@@ -59,6 +59,9 @@ cd ~/code/personal/mysqlbot
 **连接方式**：`--dsn mysql://user:pass@host:port/`、或 `--host/--port/-u/-p`、或
 `--socket`、或 `--defaults-file ~/.my.cnf`（复用 login-path）。密码也可走
 `MYSQLBOT_PASSWORD` / `MYSQL_PWD` 环境变量，避免进 shell 历史。
+
+⚠️ **`-p` 必须带值**（`-p '密码'`）。它是普通的 argparse 选项，不是 mysql 客户端那种
+"留空则交互提示"的写法 —— 省略值会直接以 `expected one argument` 报错退出。
 
 > 注意 `--defaults-file` 必须是命令行上的**第一个**参数——这是 mysql 客户端的硬要求，
 > 工具已按此构造命令，但你手工敲 mysql 时要注意。
@@ -269,7 +272,8 @@ tests/live_compat.sh --defaults-file ~/.my.cnf --label '5.7.44'
 ```
 mysqlbot/
 ├── SKILL.md                本文件
-├── README.md               仓库说明
+├── README.md               仓库说明（**英文**，面向公开仓库；结构对齐 pgbot）
+├── README_CN.md            同上中文版（两份内容一一对应，改一份要同步另一份）
 ├── bin/mbot                启动器
 ├── mbot/                   实现（rule 解析 / signals / conn / probe / runner / report / cli）
 ├── rules/*.sql             42 条规则（核心资产）
